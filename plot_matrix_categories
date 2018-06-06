@@ -1,0 +1,859 @@
+#!/usr/bin/perl
+BEGIN{
+  push @INC, 
+    "$ENV{CODE_BASE}/scouras",
+    #"/users/scouras/code/scouras",
+    #"/users/scouras/lab/code/scouras",
+    #"/users/scouras/code/fragments",
+  }
+use warnings;
+use strict;
+use Plot;
+use Utility;
+use POSIX;
+use Data::Dumper;
+#use Getopt::Long;
+#Getopt::Long::Configure ( "gnu_compat" );
+
+
+# TODO: Transpose doesn't work for some reason.
+
+my $R = '/net/programs/R_2.3.0/bin/R';
+if ( -e "/usr/bin/R" ) { $R = "/usr/bin/R" };
+
+#========= USAGE
+sub usage { 
+  print "Error: $_[0]\n\n";
+  print   "Usage: $0 <path to data file (optionally gzipped)> \n"
+        . "    [res=<resolution of both axes (default 1)>]\n"
+        . "    [xres=<resolution of x axis (default 1)>]\n"
+        . "    [yres=<resolution of y axis (default 1)>]\n"
+        . "    [title=<title (default 'Matrix [directory]')>]\n"
+        . "    [suffix=<suffix to title when title is auto>]\n"
+        . "    [png=<filename (default 'Matrix [directory]')>]\n"
+        . "    [zscale=<linear or log (default linear)>]\n"
+        . "    [xstart=<start index of x axis>]\n"
+        . "    [ystart=<start index of y axis>]\n"
+        . "    [xlabel=<label of x axis>]\n"
+        . "    [ylabel=<label of y axis>]\n"
+        . "    [height=<pixel height of image (default 768)>]\n"
+        . "    [width=<pixel width of image (default 1024)>]\n"
+        . "    [nolegend (turns off the legend, default on)]\n"
+        . "    [tick_interval=<time between axis ticks> (default auto)>]\n"
+        . "    [ticks=<location of each axis tick, comma separated (ex: ticks=3,5,9,12)(default auto)>]\n"
+        . "    [zbottom=<z threshold below which is plotted gray>]\n"
+        . "    [zmin=<minimum z height>]\n"
+        . "    [zmax=<maximum z height>]\n"
+        . "    [legendlabel=<label for legend (default 'Frequency')>]\n"
+        . "    [annotation=<string with annotations (default none)>]\n"
+        . "    [constrain (limit the plotting area to the exact matrix) (default false)]\n"
+        . "    [colorcheme=<colorcheme (default grayscale, available:rainbow, red-blue)>]\n"
+        . "    [reversecolors (make red high and blue low)]\n"
+        . "    [zcolors=<colors per log unit (default 4)>]\n"
+        . "    [catx (force read row headers)]\n"
+        . "    [caty (force read column headers)]\n"
+        . "    [square (force square plot)]\n"
+        . "    [bgcolor=<background color>]\n"
+        ;
+  exit;
+}
+
+if ( scalar @ARGV == 0 ) { &usage };
+
+
+# INPUT FILE
+
+my $pwd = `pwd`;
+chomp $pwd;
+
+# Read command line arguements.
+
+my $path_init         = $ARGV[0] || usage();
+my $DEFAULT_FILE      = 'matrix.dat';
+my $DEFAULT_FILE_GZ   = 'matrix.dat.gz';
+my $x_label           = "X Axis";
+my $y_label           = "Y Axis";
+
+my $POINTSIZE         =   16;
+#my $POINTSIZE         =   40;
+my $CEX_AXIS          =    1.5;
+my $CEX_LABELS        =    2.0;
+my $CEX_TITLE         =    2.0;
+#my $CEX_LEGEND_TITLE  =    4.0;
+#my $CEX_LEGEND_AXIS   =    4.0;
+my $CEX_LEGEND        =    1.0;
+
+#my $LWD_DEFAULT       =    4.0;
+#my $LWD_GRID          =    8.0;
+#my $LWD_BORDER        =   12.0; 
+#my $LWD_AXIS          =    8.0;
+#
+my $LWD_DEFAULT       =    4.0;
+my $LWD_GRID          =    2.0;
+my $LWD_BORDER        =    4.0; 
+my $LWD_AXIS          =    4.0;
+my $LWD_LEGEND        =    3.0;
+
+my $constrain         =    0;
+my $reverse_colors    =    0;
+
+my $title;
+my $suffix;
+my $png               =    0;
+my $image_height      =  768;
+my $image_width       = 1024;
+my $show_legend       =    1;
+my $legend_width      =  250;
+
+my $colors_per_tick;
+
+my $tick_size;
+my $tick_interval     =    0;
+my $tick_string       =    0;
+my $xtick_size;
+my $xtick_interval    =    0;
+my $xtick_string      =    0;
+my $ytick_size;
+my $ytick_interval    =    0;
+my $ytick_string      =    0;
+my $ztick_size;
+my $ztick_interval    =    0;
+my $ztick_string      =    0;
+
+my $colorscheme       = 'grayscale';
+my $z_scale           = 'linear';
+my $transpose         =    0;
+
+my $legend_label      = 'Frequency';
+my $legend_vscale     = 1.0;
+my $annotation        = '';
+
+my $data_min;
+my $data_max;
+
+my $x_min;
+my $x_max;
+my $x_fill;
+my $y_min;
+my $y_max;
+
+my $z_max;
+my $z_min;
+my $z_bottom;
+my $z_top;
+
+my $X_LABEL_ORIENTATION = 2; # 1 is parallel, 2 is perpendicular
+my $Y_LABEL_ORIENTATION = 2;
+
+my $MARGIN_BOTTOM = 1.0;
+my $MARGIN_LEFT   = 4.1;
+my $MARGIN_TOP    = 4.1;
+my $MARGIN_RIGHT  = 0.1;
+#my $MARGIN_RIGHT  = 2.1;
+
+my $MAI_OUTER_BOTTOM  = 2.5;
+my $MAI_OUTER_LEFT    = 2.5;
+my $MAI_OUTER_TOP     = 1.0;
+my $MAI_OUTER_RIGHT   = 0.5;
+
+#my $MAI_MAIN_BOTTOM   = 3.0;
+my $MAI_MAIN_BOTTOM   = 2.5;
+my $MAI_MAIN_LEFT     = 2.5;
+my $MAI_MAIN_TOP      = 1.0;
+my $MAI_MAIN_RIGHT    = 0.5;
+
+my $MAI_LEGEND_BOTTOM = 1.0;
+my $MAI_LEGEND_LEFT   = 0.0;
+my $MAI_LEGEND_TOP    = 0.0;
+my $MAI_LEGEND_RIGHT  = 0.5;
+
+
+my $MARGIN_BOTTOM_USER;
+my $MARGIN_LEFT_USER;
+my $MARGIN_TOP_USER;
+my $MARGIN_RIGHT_USER;
+
+
+
+# By default, unless transpose is called, the column titles are placed on the
+# Y axis, i.e. by default the plot IS TRANSPOSED relative to the layout of the
+# data file.  So Category X if column headers are categories, and vice versa.
+my $X_AXIS_TYPE;
+my $Y_AXIS_TYPE;
+my $IS_CATEGORY_X = 0;
+my $IS_CATEGORY_Y = 0;
+my $IS_AXIS_X = 0;
+my $IS_AXIS_Y = 0;
+my $SQUARE = 0;
+
+
+# FIND AND VERIFY THE FILE
+# separate path, current directory, and file title
+my ( $path, $dir, $file) = Utility::Split_Path($path_init, [$DEFAULT_FILE, $DEFAULT_FILE_GZ]);
+if ( not $path ) { usage("Path not found '$path'.") };
+if ( not $file ) { usage("File not found '$path_init'") }
+if ( -d $path  ) { usage("Path is a directory? '$path'") }
+my $TEMP_MATRIX = "$dir/tmp_matrix.dat";
+
+print "Processing file '$path'\n";
+
+foreach my $arg (@ARGV[1..$#ARGV]) {
+  my ($var, $val) = split '=', $arg;
+  if ( $var eq 'xlabel'       ) { $x_label          = $val; next; }
+  if ( $var eq 'ylabel'       ) { $y_label          = $val; next; }
+  if ( $var eq 'title'        ) { $title            = $val; next; }
+  if ( $var eq 'suffix'       ) { $suffix           = $val; next; }
+  if ( $var eq 'png'          ) { $png              = $val; next; }
+  if ( $var eq 'height'       ) { $image_height     = $val; next; }
+  if ( $var eq 'width'        ) { $image_width      = $val; next; }
+  if ( $var eq 'legend_width' ) { $legend_width     = $val; next; }
+  if ( $var eq 'nolegend'     ) { $show_legend      = 0;    next; }
+
+  if ( $var eq 'ticks'        ) { $tick_string      = $val; next; }
+  if ( $var eq 'ticksize'     ) { $tick_size        = $val; next; }
+  if ( $var eq 'tickinterval' ) { $tick_interval    = $val; next; }
+  if ( $var eq 'xticks'       ) { $xtick_string     = $val; next; }
+  if ( $var eq 'xticksize'    ) { $xtick_size       = $val; next; }
+  if ( $var eq 'xtickinterval') { $xtick_interval   = $val; next; }
+  if ( $var eq 'yticks'       ) { $ytick_string     = $val; next; }
+  if ( $var eq 'yticksize'    ) { $ytick_size       = $val; next; }
+  if ( $var eq 'ytickinterval') { $ytick_interval   = $val; next; }
+  if ( $var eq 'zticks'       ) { $ztick_string     = $val; next; }
+  if ( $var eq 'zticksize'    ) { $ztick_size       = $val; next; }
+  if ( $var eq 'ztickinterval') { $ztick_interval   = $val; next; }
+
+  if ( $var eq 'min'          ) { $data_min         = $val; next; }
+  if ( $var eq 'max'          ) { $data_max         = $val; next; }
+  if ( $var eq 'xfill'        ) { $x_fill           = $val; next; }
+  
+  if ( $var eq 'zscale'       ) { $z_scale          = $val; next; }
+  if ( $var eq 'ztop'         ) { $z_top            = $val; next; }
+  if ( $var eq 'zbottom'      ) { $z_bottom         = $val; next; }
+  if ( $var eq 'zmin'         ) { $z_min            = $val; next; }
+  if ( $var eq 'zmax'         ) { $z_max            = $val; next; }
+  if ( $var eq 'zcolors'      ) { $colors_per_tick  = $val; next; }
+
+  if ( $var eq 'legendlabel'  ) { $legend_label     = $val; next; }
+  if ( $var eq 'legendscale'  ) { $legend_vscale    = $val; next; }
+  if ( $var eq 'annotation'   ) { $annotation       = $val; next; }
+  if ( $var eq 'constrain'    ) { $constrain        = 1;    next; }
+  if ( $var eq 'colorscheme'  ) { $colorscheme      = $val; next; }
+  if ( $var eq 'reversecolors') { $reverse_colors   = 1;    next; }
+  if ( $var eq 'transpose'    ) { $transpose        = 1;    next; }
+
+  if ( $var eq 'catx'         ) { $IS_CATEGORY_X    = 1;    next; }
+  if ( $var eq 'caty'         ) { $IS_CATEGORY_Y    = 1;    next; }
+  if ( $var eq 'axisx'        ) { $IS_AXIS_X        = 1;    next; }
+  if ( $var eq 'axisy'        ) { $IS_AXIS_Y        = 1;    next; }
+
+  if ( $var eq 'square'       ) { $SQUARE           = 1;    next; }
+
+  if ( $var eq 'marbottom'    ) { $MARGIN_BOTTOM_USER = $val; next; }
+  if ( $var eq 'marleft'      ) { $MARGIN_LEFT_USER   = $val; next; }
+  if ( $var eq 'martop'       ) { $MARGIN_TOP_USER    = $val; next; }
+  if ( $var eq 'marright'     ) { $MARGIN_RIGHT_USER  = $val; next; }
+
+}
+
+
+#====================================== Set Default Title to Input File Name
+if ( not defined $title ) { 
+  $title = $file;          
+  $title =~ s/\.(\w+)$//g; # remove extension
+  if ( defined $suffix ) { $title .= $suffix }
+}
+print "Using title '$title'\n";
+
+#====================================== Set Output PNG File
+if ( not $png ) { $png = ($title || 'matrix') . ".png" }
+my ($png_path, $png_dir, $png_file) = Utility::Split_Path($png);
+$png_file = lc Utility::Clean_Filename($png_file);
+$png_path = "$png_dir/$png_file";
+
+
+####################################### Read the Data File
+my @CONTENTS = map { [split /\s+/, $_] } split "\n", `cat "$path"`;
+#use Data::Dumper;
+#print Dumper(\@CONTENTS);
+if ( $transpose ) { @CONTENTS = Utility::Transpose(\@CONTENTS) }
+my $DATA_WIDTH = scalar @{$CONTENTS[1]} - 1;
+
+#====================================== Select the Candidate Headers
+$CONTENTS[0][0] =~ s/#\s*//; # remove comment character
+my @X_HEADERS = map { $_->[0] } @CONTENTS[1..$#CONTENTS]; # file row headers
+my @Y_HEADERS = @{$CONTENTS[0]};    # file column headers
+
+if    ( $DATA_WIDTH == (scalar @Y_HEADERS)    ) { } # do nothing
+elsif ( $DATA_WIDTH == (scalar @Y_HEADERS - 1)) { shift @Y_HEADERS } #ignore first header
+else  { die "Disparity between data width and number of headers" }
+
+printf "Headers X: %u\nHeaders Y: %u\nData Width: %u\n", 
+  scalar @X_HEADERS,
+  scalar @Y_HEADERS,
+  $DATA_WIDTH,
+  ;
+
+
+#============================================== Extract The Data to New Matrix
+# Ensure data is within thresholds, else NA
+my @DATA = ();
+foreach my $i ( 1..$#CONTENTS ) { 
+  foreach my $j ( 1..$DATA_WIDTH ) { 
+    my $datum = $CONTENTS[$i][$j];
+    if ( not defined $datum ) { 
+      die "Value at row $i col $j is not defined. '$datum'\n";
+    }
+    if ( not Utility::Is_Number($datum) ) { 
+      die "Value at row $i col $j is not a number, '$datum'\n";
+    }
+    if    ( defined $data_min and $datum < $data_min ) { $datum = 'NA' }
+    elsif ( defined $data_max and $datum > $data_max ) { $datum = 'NA' }
+    $DATA[$i-1][$j-1] = $datum;
+  }
+}
+
+
+
+
+#====================================== Store the data in a clean, R-friendly temporary file
+my %MATRIX_FILE_OPTIONS = (
+  overwrite   => 1,
+  #title       => '',
+  #row_labels  => \@X_HEADERS,
+  #col_labels  => \@Y_HEADERS,
+  delimiter   => "\t",
+);
+Utility::Write_Matrix ( $TEMP_MATRIX, \@DATA, \%MATRIX_FILE_OPTIONS );
+
+
+
+#===== Bin the data and produce the data
+#      That is, set where the breaks are in the color spectrum
+
+
+
+my %OPT = (
+  log_base          => 10,
+  cutoff_min        => $z_min,
+  cutoff_max        => $z_max,  
+  gradient_min      => $z_bottom,
+  gradient_max      => $z_top,
+  colors_per_tick   => $colors_per_tick,
+  tick_size         => $tick_size,
+  ztick_size        => $ztick_size || $tick_size,
+  legend_label      => $legend_label,
+  legend_vscale     => $legend_vscale,
+  #cex_legend_title  => $CEX_LEGEND_TITLE,
+  #cex_legend_axis   => $CEX_LEGEND_AXIS,
+  legend_cex        => $CEX_LEGEND,
+  legend_lwd        => $LWD_LEGEND,
+  z_scale           => $z_scale,
+  legend_margins    => [$MAI_LEGEND_BOTTOM, $MAI_LEGEND_LEFT, $MAI_LEGEND_TOP, $MAI_LEGEND_RIGHT],
+);
+my %BREAKS;
+my $LEGEND_TEXT;
+if ( $z_scale eq 'linear' ) { 
+  %BREAKS      = Plot::R_Create_Breaks_Linear(\%OPT, \@DATA);
+  $LEGEND_TEXT = Plot::R_Legend_Spectrumbar  (\%OPT, \%BREAKS);
+} elsif ( $z_scale eq 'log' ) { 
+  %BREAKS      = Plot::R_Create_Breaks_Log   (\%OPT, \@DATA);
+  $LEGEND_TEXT = Plot::R_Legend_Spectrumbar  (\%OPT, \%BREAKS);
+} else { 
+  die "Unknown zscale '$z_scale'.\n";
+}
+
+
+#==================================================== Determine X&Y Axis Types
+
+
+
+#--- Axis X
+if ( $IS_AXIS_X ) { # Verify these are numbers
+  foreach my $h ( @X_HEADERS ) {
+    if ( not Utility::Is_Number($h) ) { 
+      die "Axis X contains non-numbers, '$h'.\n";
+    }
+  }
+} elsif ( not $IS_CATEGORY_X ) { 
+  foreach my $h ( @X_HEADERS ) { 
+    if ( not $h=~/^[\d\.\-\+]+$/ ) { 
+      $IS_CATEGORY_X = 1; 
+      last;
+    }
+  }
+}
+
+my $R_ROW_LABELS = "";
+if ( $IS_AXIS_X ) { 
+  $X_AXIS_TYPE = 'AXIS';
+  my $X_INCR = 1;
+  if ( scalar @X_HEADERS > 1 ) { $X_INCR = $X_HEADERS[1]-$X_HEADERS[0] }
+  $R_ROW_LABELS = "c(" . (join ',', @X_HEADERS, ($X_HEADERS[-1]+$X_INCR)) . ")\n";
+} elsif ( $IS_CATEGORY_X ) { 
+  $X_AXIS_TYPE = 'CATEGORIES';
+  $R_ROW_LABELS = "c(" . (join ',', map {"'$_'"} @X_HEADERS) . ")\n";
+} else { 
+  $X_AXIS_TYPE = 'DATA';
+  $R_ROW_LABELS = "c(" . (join ',', 1..(scalar @X_HEADERS + 1)) . ")\n";
+}
+
+
+#--- Axis Y
+if ( $IS_AXIS_Y ) { # Verify these are numbers
+  foreach my $h ( @Y_HEADERS ) {
+    if ( not Utility::Is_Number($h) ) { 
+      die "Axis Y contains non-numbers, '$h'.\n";
+    }
+  }
+} elsif ( not $IS_CATEGORY_Y ) { 
+  foreach my $h ( @Y_HEADERS ) { 
+    if ( not $h=~/^[\d\.\-\+]+$/ ) { 
+      $IS_CATEGORY_Y = 1; 
+      last;
+    }
+  }
+}
+
+my $R_COL_LABELS = "";
+if ( $IS_AXIS_Y ) { 
+  $Y_AXIS_TYPE = 'AXIS';
+  my $Y_INCR = $Y_HEADERS[1]-$Y_HEADERS[0];
+  $R_COL_LABELS = "c(" . (join ',', @Y_HEADERS, ($Y_HEADERS[-1]+$Y_INCR)) . ")\n";
+} elsif ( $IS_CATEGORY_Y ) { 
+  $Y_AXIS_TYPE = 'CATEGORIES';
+  $R_COL_LABELS = "c(" . (join ',', map {"'$_'"} @Y_HEADERS) . ")\n";
+} else { 
+  $Y_AXIS_TYPE = 'DATA';
+  $R_COL_LABELS = "c(" . (join ',', 1..(scalar @Y_HEADERS + 1)) . ")\n";
+}
+
+
+print "Axis X is type $X_AXIS_TYPE\n"
+    . "Axis Y is type $Y_AXIS_TYPE\n"
+    ;
+
+
+
+
+
+#===== Program the axticks
+
+#print "Using tick_interval $tick_interval\n";
+
+my ($ticklab, $xticklab, @xticklab, $yticklab, @yticklab, $tickloc, $xtickloc, $ytickloc, @ticklab, @tickloc);
+if ( $xtick_string ) {
+  @xticklab = map { $_ } split /,/, $xtick_string;
+} elsif ( $xtick_interval ) { 
+  @xticklab = map { $xtick_interval * $_ } (-100..1000);
+}
+
+if ( $ytick_string ) {
+  @yticklab = map { $_ } split /,/, $ytick_string;
+} elsif ( $ytick_interval ) { 
+  @yticklab = map { $ytick_interval * $_ } (-100..1000);
+}
+
+if ( $tick_string ) {
+  @ticklab = map { $_ } split /,/, $tick_string;
+} elsif ( $tick_interval ) { 
+  @ticklab = map { $tick_interval * $_ } (-100..1000);
+} 
+
+if ( not scalar @xticklab ) { @xticklab = @ticklab }
+if ( not scalar @yticklab ) { @yticklab = @ticklab }
+
+
+if ( scalar @xticklab ) { 
+  $xticklab = "c(" . (join ',', @xticklab) . ")";
+  $xtickloc = "c(" . (join ',', @xticklab) . ")";
+  print "  Placing axis xtick marks at $xticklab.\n";
+} else { 
+  #if ( $X_AXIS_TYPE eq 'AXIS' ) { 
+  #  my $x_data_min = Utility::Min(@X_HEADERS);
+  #  my $x_data_max = Utility::Max(@X_HEADERS);
+    
+    
+  print "  Autogenerating xtick marks.\n";
+}
+
+if ( scalar @yticklab ) { 
+  $yticklab = "c(" . (join ',', @yticklab) . ")";
+  $ytickloc = "c(" . (join ',', @yticklab) . ")";
+  print "  Placing axis ytick marks at $yticklab.\n";
+} else { 
+  print "  Autogenerating ytick marks.\n";
+}
+
+
+######################################################## PREPARE ROW/COL LABELS
+# Generate axis labels at the correct intervals, as well as the markers for
+# their places.
+
+#============================================================ X AXIS CATEGORIES
+# TODO: Need to push axis label back down.
+#
+my $xgrid;
+my $ygrid;
+if ( $X_AXIS_TYPE eq 'CATEGORIES' ) { 
+  my @range = 0..$#X_HEADERS;
+  my $xti = $xtick_interval // $tick_interval;
+  if ( $xti ) { 
+    @range   = Utility::Range(0, $#X_HEADERS, $xti, 1);
+  }
+  my @headers = @X_HEADERS[@range];
+  $MARGIN_BOTTOM = Utility::Max( map { length $_ } @headers );
+ 
+  $xticklab = "c(" . (join ',', map { "'$_'" } @headers) . ")";
+  $xtickloc = "c(" . (join ',', @range)                  . ")";
+  #$xgrid    = "c(" . (join ',', 0..@X_HEADERS           ) . ")";
+  print "Making Categorical X Ticks\n$xticklab\n$xtickloc\n\n";
+} elsif ( $X_AXIS_TYPE eq 'AXIS' ) { 
+  #$xticklab = $R_ROW_LABELS;
+  #$xtickloc = $R_ROW_LABELS;
+}
+
+#============================================================ Y AXIS CATEGORIES
+if ( $Y_AXIS_TYPE eq 'CATEGORIES' ) { 
+  my @range   = 0..$#Y_HEADERS;
+  my $yti = $ytick_interval // $tick_interval // 1;
+  if ( $yti ) { 
+    @range   = Utility::Range(0, $#Y_HEADERS, $yti, 1);
+  }
+  my @headers = @Y_HEADERS[@range];
+  $MARGIN_LEFT = Utility::Max( map { length $_ } @headers ) *0.9;
+
+  $yticklab = "c(" . (join ',', map { "'$_'" } @headers ) . ")";
+  $ytickloc = "c(" . (join ',', @range                  ) . ")";
+  #$ygrid    = "c(" . (join ',', 0..@Y_HEADERS           ) . ")";
+  print "Making Categorical Y Ticks\n$yticklab\n$ytickloc\n\n";
+} elsif ( $Y_AXIS_TYPE eq 'AXIS' ) { 
+  #$yticklab = $R_COL_LABELS;
+  #$ytickloc = $R_COL_LABELS;
+}
+
+$xgrid ||= $xtickloc;
+$ygrid ||= $ytickloc;
+
+
+
+############################################################### PREPARE MARGINS
+
+if ( defined $MARGIN_BOTTOM_USER ) { $MARGIN_BOTTOM = $MARGIN_BOTTOM_USER }
+if ( defined $MARGIN_LEFT_USER   ) { $MARGIN_LEFT   = $MARGIN_LEFT_USER   }
+if ( defined $MARGIN_TOP_USER    ) { $MARGIN_TOP    = $MARGIN_TOP_USER    }
+if ( defined $MARGIN_RIGHT_USER  ) { $MARGIN_RIGHT  = $MARGIN_RIGHT_USER  }
+print "Using margins: $MARGIN_BOTTOM, $MARGIN_LEFT, $MARGIN_TOP, $MARGIN_RIGHT\n";
+
+
+
+#print "Base Breaks: " . (join ',', map { sprintf "%.2f", $_ } @base_breaks ) . "\n";
+#print "Full Breaks: " . (join ',', map { sprintf "%.2f", $_ } @breaks ) . "\n";
+
+
+################################################################ PREPARE COLORS
+
+my $R_COLOR_TEXT 
+    = Plot::R_Get_Colors ( 
+        $colorscheme, 
+        $BREAKS{'num_colors'}, 
+        $reverse_colors, 
+        $z_scale,
+        defined ( $z_bottom ?  'gray' : undef ),
+      );
+
+
+################################################################ PREPARE LAYOUT
+
+#--- Legend needs 250 pixels, the plot can have the rest
+my $PART_WIDTH_LEGEND;
+my $PART_WIDTH_MAIN;
+if ( $legend_width > 0 ) { 
+  $PART_WIDTH_LEGEND = $legend_width;
+} else { 
+  $PART_WIDTH_LEGEND = sprintf "%.0f", $image_width * $legend_width;
+}
+$PART_WIDTH_MAIN   = $image_width - $PART_WIDTH_LEGEND;
+
+
+###############################################################################
+#                                                                   CREATE PLOT
+###############################################################################
+print "\n\n" . ('#' x 120) . "\n\n";
+print "Creating R plot for RMSD MATRIX: $title.\n";
+print "\n\n";
+
+#===== Print the R file
+my $r_out_file = "$dir/tmp_matrix.R";
+open (ROUT,">$r_out_file") 
+  or die "Couldn't open R output file tmp_matrix.R :$!\n";
+
+print ROUT  "
+##### PNG OUTPUT FILE
+png ( width=$image_width, 
+      height=$image_height, 
+      file='$png_path', 
+      pointsize=$POINTSIZE,
+    )
+
+##### MARGINS (INCHES) FOR WHOLE PLOT 
+# Set to 0 if legend is included, else make default sizes
+
+
+##### SAVE MARGINS  (bottom, left, top, right)
+#mar.orig <- (par.orig <- par(c('mar', 'las', 'mfrow')))\$mar
+#on.exit(par(par.orig))
+#mar <- mar.orig
+" 
+
+. ( (not $show_legend) ? "
+par(mai=c($MAI_OUTER_BOTTOM, $MAI_OUTER_LEFT, $MAI_OUTER_TOP, $MAI_OUTER_RIGHT))
+" : "
+##### ADD LEGEND LAYOUT
+#mar <- c(mar[1] + $MARGIN_BOTTOM, $MARGIN_LEFT, $MARGIN_TOP, $MARGIN_RIGHT)
+#par(mar=mar)
+#mar
+par(mai=c(0.0, 0.0, 0.0, 0.0))
+layout ( matrix ( c(1,2), 1, 2, byrow=TRUE), widths=c($PART_WIDTH_MAIN, $PART_WIDTH_LEGEND))
+par(mai=c($MAI_MAIN_BOTTOM, $MAI_MAIN_LEFT, $MAI_MAIN_TOP, $MAI_MAIN_RIGHT))
+"  ) . "
+ 
+##### IMPORT DATA
+ 
+z     <- read.table('$TEMP_MATRIX')
+data  <- as.matrix(array(  z, dimnames=NULL))
+x     <- seq ( 0, length(z[,1] ) )
+y     <- seq ( 0, length(z[1,] ) )
+
+row_labels <- $R_ROW_LABELS
+col_labels <- $R_COL_LABELS
+
+" . ( $X_AXIS_TYPE eq 'AXIS' ? "x <- row_labels" : "") . "
+" . ( $Y_AXIS_TYPE eq 'AXIS' ? "y <- col_labels" : "") . "
+
+
+" . ( $IS_AXIS_X ? "
+#x <- as.vector(rownames(z), mode='numeric')
+#x <- row_labels
+#x <- c(x, x[length(x)]+x[2]-x[1])
+" : "#x <- seq ( 0, length(z[,1] ) )\n" ) . "
+
+" . ( $IS_AXIS_Y ? "
+#y <- as.vector(colnames(z), mode='numeric')
+#y <- col_labels
+#y <- c(y, y[length(y)]+y[2]-y[1])
+" : "#y <- seq ( 0, length(z[1,] ) )\n" ) . "
+
+
+
+length(row_labels)
+row_labels
+
+length(col_labels)
+col_labels
+
+dim(data)
+#data
+
+$R_COLOR_TEXT
+colors
+long_colors
+
+##### BREAKS FOR COLORS
+breaks = c ( " . (join ',',  @{$BREAKS{'full_breaks'}} ) . " )
+
+length(colors)
+length(breaks)
+
+##### PLOT MAIN DATA
+" . ( $SQUARE ? "par (pty='s', lwd=$LWD_BORDER)" : "par (pty='m', lwd=$LWD_BORDER)" ) . "
+image ( x, y, data, 
+        col       = long_colors, 
+        breaks    = breaks,
+        " . ($xtickloc ? "xaxt='n', " : "xaxs='i', ") . "
+        " . ($ytickloc ? "yaxt='n', " : "yaxs='i', ") . "
+        asp       = $SQUARE,
+        xlab      = '',
+        ylab      = '',
+        cex.axis  = $CEX_AXIS,
+        cex.lab   = $CEX_LABELS,
+        lwd       = $LWD_DEFAULT
+      )
+
+rect(par('usr')[1], par('usr')[3], par('usr')[2], par('usr')[4], col = 'gray')
+
+image ( x, y, data, 
+        col       = long_colors, 
+        breaks    = breaks,
+        " . ($xtickloc ? "xaxt='n', " : "xaxs='i', ") . "
+        " . ($ytickloc ? "yaxt='n', " : "yaxs='i', ") . "
+        asp       = $SQUARE,
+        xlab      = '',
+        ylab      = '',
+        cex.axis  = $CEX_AXIS,
+        cex.lab   = $CEX_LABELS,
+        lwd       = $LWD_DEFAULT,
+        add=TRUE,
+      )
+
+";
+
+#=========================================================== X AXIS/GRID LINES
+#----------------- Regularly Spaced Numeric Axis
+if ( $X_AXIS_TYPE eq 'AXIS' and $xtickloc) { 
+  print ROUT "
+    axis ( 1, 
+           at         = $xtickloc, 
+           labels     = $xticklab, 
+           las        = $X_LABEL_ORIENTATION, 
+           cex.axis   = $CEX_AXIS, 
+           lwd        = $LWD_AXIS,
+           #padj       = 1.0,
+           family     = 'mono',
+         )
+
+    abline ( v    = $xgrid, 
+             col  = 'black', 
+             lwd  = $LWD_GRID, 
+           )
+";
+
+#----------------- Categorical Axis
+} elsif ( $X_AXIS_TYPE eq 'CATEGORIES' ) { 
+  print ROUT "
+    axis ( 1, 
+           at         = $xtickloc+0.5, 
+           labels     = $xticklab, 
+           las        = $X_LABEL_ORIENTATION, 
+           cex.axis   = $CEX_AXIS, 
+           lwd        = $LWD_AXIS,
+           #padj       = 0.5,
+           #hadj       = 1.0,
+           family     = 'mono',
+         )
+
+    abline ( v        = $xgrid, 
+             col      = 'black', 
+             lwd      = $LWD_GRID,
+           )
+";
+
+#----------------- Irregularly Spaced Numeric Axis
+} else { 
+  print ROUT "
+    abline ( v        = axTicks( 1 ), 
+             col      = 'black', 
+             lwd      = $LWD_GRID,
+           )
+";
+}
+
+
+#=========================================================== Y AXIS/GRID LINES
+#----------------- Regularly Spaced Numeric Axis
+if ( $Y_AXIS_TYPE eq 'AXIS' and $ytickloc) { 
+  print ROUT "
+    axis ( 2, 
+           at         = $ytickloc, 
+           labels     = $yticklab, 
+           las        = $Y_LABEL_ORIENTATION, 
+           cex.axis   = $CEX_AXIS, 
+           lwd        = $LWD_AXIS,
+           family     = 'mono',
+         )
+
+    abline ( h        = $ygrid, 
+             col      = 'black', 
+             lwd      = $LWD_GRID,
+           )
+";
+
+#----------------- Categorical Axis
+} elsif ( $Y_AXIS_TYPE eq 'CATEGORIES' ) { 
+  print ROUT "
+    axis ( 2, 
+           at         = $ytickloc+0.5, 
+           labels     = $yticklab, 
+           las        = $Y_LABEL_ORIENTATION, 
+           cex.axis   = $CEX_AXIS, 
+           lwd        = $LWD_AXIS,
+           family     = 'mono',
+         )
+
+    abline ( h        = $ygrid, 
+             col      = 'black', 
+             lwd      = $LWD_GRID,
+           )
+";
+
+#----------------- Irregularly Spaced Numeric Axis
+} else { 
+  print ROUT "
+    abline ( h        = axticks( 2 ), 
+             col      = 'black', 
+             lwd      = $LWD_GRID,
+           )
+";
+}
+
+
+#===================================================== TITLES AND BOUNDING BOX
+
+print ROUT "
+  
+  #--------------- MAIN PLOT TITLE
+  title ( main      = '$title', 
+          outer     = FALSE, 
+          line      = 1, 
+          cex.main  = $CEX_TITLE,
+        )
+
+  box(which='plot')
+ 
+  #--------------- X AXIS LABEL
+  title ( xlab    = '$x_label', 
+          line    = 6, 
+          xpd     = NA, 
+          cex.lab = $CEX_LABELS, 
+        )
+
+  #--------------- Y AXIS LABEL
+  title ( ylab    = '$y_label', 
+          line    = 6, 
+          xpd     = NA, 
+          cex.lab = $CEX_LABELS,
+        )
+";
+
+
+
+#====================================================================== LEGEND
+
+if ( $show_legend ) { 
+  #print ROUT "par(mai=c($MAI_LEGEND_BOTTOM, $MAI_LEGEND_LEFT, $MAI_LEGEND_TOP, $MAI_LEGEND_RIGHT))\n";
+  print ROUT $LEGEND_TEXT;
+}
+
+#================================================================= ANNOTATIONS
+
+if ( length $annotation > 0 ) { 
+  print ROUT "
+# ANNOTATION UNDER LEGEND
+ann=c($annotation)
+ann_base  = 3
+ann_lines = ann_base + 1.25 * seq( 0-length(ann) + 1, 0, 1 )
+ann_lines
+mtext ( paste(ann), side=1, adj=1, padj=0, family='mono', font=2, cex=1.5, line=ann_lines )
+";
+}
+
+
+
+
+
+#==================================================== CLOSE, PLOT, AND TIDY UP
+close(ROUT);
+
+my $command = "$R --no-save < '$r_out_file'";
+my $result = `$command`;
+print $result;
+

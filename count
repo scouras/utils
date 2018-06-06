@@ -1,0 +1,588 @@
+#!/usr/bin/perl
+BEGIN { push @INC, "$ENV{CODE_BASE}/scouras" }
+use Utility;
+use Getopt::Long;
+use warnings;
+use strict;
+
+
+
+###############################################################################
+#                        Count Tokens in a File
+#------------------------------------------------------------------------------
+# Alexander D. Scouras
+# alexscouras@gmail.com
+# Created: 15 Sept 2012
+# Modified: 9 April 2013
+#------------------------------------------------------------------------------
+my $HELP_LONG = << '__HELP_LONG__';
+Given a file (white-space delimited matrix), split the data into tokens
+by space and optional delimiters.  Can select columns from the matrix either
+by number or by the column header. Token matching and column header matching
+are both case-insensitive by default, but see option flags.
+
+Output can be sorted in multiple ways:
+  count:    count of each token
+  numeric:  sort tokens as number
+  alpha:    sort tokens as words
+  input:    sort tokens by input order in file (useful for later joins)
+
+Sort order can be ascending or descending
+
+-w makes token matching case-sensitive
+-h makes column header matching case-sensitive
+
+Delimiter is a regular expression that can split columns into more tokens,
+allowing you to say select columns with column separated lists, then count
+the tokens in those lists.  
+
+-min and -max filter for tokens with a certain number of occurances.
+
+Filter is a regular expression for selecting tokens.  For instance, you could
+count this perl program and filter for "^\w+$" to get a (very) imperfect
+estimate of the important variables used in it (along with a lot of other
+keywords and such). Use --del='\b' to split the lines at word boundaries
+for this.
+
+The program spits out some summary info at the top, as well as column 
+headers.  Use -quiet to turn this off. 
+
+Example output:
+
+> count count --del='\b' --filter='^\w+$' --sort=alpha -min=10 -max=11
+# LINES:                   270
+# UNIQUE TOKENS            173
+# MATCHED TOKEN:           597
+# TOTAL TOKENS:           1325
+------------------------------
+#TOKEN                   COUNT
+COUNTS                      10
+word                        11
+
+__HELP_LONG__
+
+#------------------------------------------------------------------------------
+my $HELP_OPTIONS = << '__HELP_OPTIONS__';
+  Output Sort Options:
+    -s  --sort=C|A|N|I      | sort output by count, alpha, numeric, or input
+    -o  --order=STRING)     | ascending or descending
+    -p  --separate          | also track and output each column separately
+  
+  Column Selection Options (can mix and call repeatedly)
+    -c  --columns=COLUMNS   | mixed list of INTs, RANGEs, and STRINGs
+                            | -c 1 -c 5-10 -c 5,7,9,10-30 -c 1-5,FOO,BAR,12
+    -cs --col-string=STRING | matches single column header without parsing string
+                            | useful if headers have ',', '-', or are integers
+                            | these each match a single column header
+                            | -cs A -cs B -cs a,b,c -cs 1 -cs 100-1000
+    -cr --col-regex=REGEX   | matches multiple headers (one regex per option)
+                            | -cr '^IPA.*'
+  
+  Filters and Delimiters:
+    -n  --min=INT           | minimum counts for output (inclusive)
+    -x  --max=INT           | maximum counts for output (inclusive)
+    -d  --del-columns=REGEX | column delimiter (default '\t')
+    -e  --del-tokens=REGEX  | token delimiter (default /\s+/)
+    -f  --filter=REGEX      | filter for tokens matching regex
+
+  Flags:
+    -i  --stdin             | read from stdin
+    -q  --quiet             | do not print summary information
+    -t  --case-sen-tokens   | match case for tokens
+    -h  --case-sen-headers  | match case for column headers
+    -w  --whitespace        | split columns on whitespace
+    -l  --lines             | split into lines
+        --no-quote-token    | do not put tokens in quotes on output
+    -k  --skip-header       | skip parsing header (file isn't a matrix)
+    -b  --tab-output        | tab-delimited output columns (default space)
+    -?  --help              | print an even help file
+    -y  --verify            | verify that requested headers exist (default false)
+
+__HELP_OPTIONS__
+
+
+###############################################################################
+
+
+
+######################################################################### Usage
+sub usage { 
+
+  print "Count and output string tokens from a file.\n\n"
+      . "count <file> <options>\n\n";
+   
+  print $HELP_OPTIONS;
+  if ( $_[0] and $_[0] eq 'LONG' ) { print $HELP_LONG }
+  
+  exit;
+}
+
+if ( scalar @ARGV == 0 ) {      # No ARGS
+  if (-t STDIN) {               # Nothing piped to STDIN
+    &usage;
+  } else {                      # STDIN, so assume -i and -k flags
+    push @ARGV, "-i";
+    push @ARGV, "-k";
+  }
+}
+
+############################################################## Global Variables
+
+# TODO: implement delword, delcolumn, ignore-case
+
+#--- Data Structures
+my %COUNTS_COLUMN = ();
+my %COUNTS_GLOBAL = (
+    LINEX_TOTAL     => 0,
+    TOKENS_TOTAL    => 0,
+    TOKENS_MATCHED  => 0,
+    TOKENS_UNIQUE   => 0,
+);
+#my %SUBCOUNTS = ();
+my @TOKENS    = ();
+my %TOKENS    = ();
+
+#--- Flags
+my $PRINT_SUMMARY         = 1;
+my $CASE_SEN_TOKENS       = 0;
+my $CASE_SEN_HEADERS      = 0;
+my $OUTPUT_TABS           = 0;
+my $SEPARATE_COLUMNS      = 0;
+my $VERIFY_HEADERS        = 0;
+my $SKIP_HEADER           = 0;
+my $QUOTE_TOKEN           = 0;
+my $READ_STDIN            = 0;
+
+#--- Options
+my $SORT                  = 'COUNT';
+my $ORDER                 = 'DEFAULT';
+my $DELIMITER_TOKENS      = '\s+';
+my $DELIMITER_COLUMNS     = '\t';
+my $FILTER                = '.*';
+my $COLUMN_PADDING        =  4;
+my @COLUMNS               = ();
+my @COLUMN_INTS           = ();
+my @COLUMN_STRS           = ();
+my @COLUMN_RGXS           = ();
+my @COLUMN_IDXS           = ();
+my $MIN;
+my $MAX;
+
+#--- Summary Info
+#my $COUNT_LINES            =  0;
+#my $COUNT_TOKENS_UNIQUE    =  0;
+#my $COUNT_TOKENS_MATCHED   =  0;
+#my $COUNT_TOKENS_TOTAL     =  0;
+
+####################################### Parse Command Line
+
+my $result = 
+GetOptions("s|sort:s"         => \$SORT,
+           "o|order:s"        => \$ORDER,
+           "p|separate"       => \$SEPARATE_COLUMNS,
+           
+           "c|columns:s"      => \@COLUMNS,
+           #"ci|columns:i"     => \@COLUMN_INTS,
+           "cs|columns:s"     => \@COLUMN_STRS,
+           "cr|columns:s"     => \@COLUMN_RGXS,
+          
+           "d|delcolumns:s"   => \$DELIMITER_COLUMNS,
+           "e|deltokens:s"    => \$DELIMITER_TOKENS,
+           "i|stdin"           => \$READ_STDIN,
+           "f|filter:s"       => \$FILTER,
+           "n|min:i"          => \$MIN,
+           "x|max:i"          => \$MAX,
+           "a|padding:i"      => \$COLUMN_PADDING,
+           
+           "t|tokenscase"     => \$CASE_SEN_TOKENS,
+           "h|headercase"     => \$CASE_SEN_HEADERS,
+           "b|taboutput"      => \$OUTPUT_TABS,
+           "y|verify"         => \$VERIFY_HEADERS,
+           "k|skipheader"     => \$SKIP_HEADER,
+           "q|quiet"          => sub { $PRINT_SUMMARY = 0 },
+           "u|quote"          => sub { $QUOTE_TOKEN = 1 },
+           "l|lines"          => sub { $DELIMITER_COLUMNS = "\n"; $DELIMITER_TOKENS = "\n" },
+           "w|whitesspace"    => sub { $DELIMITER_COLUMNS = '\s+' },
+           "help|?"           => sub { usage('LONG') },
+          );
+
+my $FILE = $ARGV[0];
+
+
+#========= Set Sensible Default Parse Options
+
+
+#---- Cleanup abbreviated sort values
+if ( not $SORT ) { die "Passed an empty sort option somehow, '$SORT'\n" }
+if    ( 'COUNT'    =~ /^$SORT/i ) { $SORT = 'COUNT'   }
+elsif ( 'NUMERIC'  =~ /^$SORT/i ) { $SORT = 'NUMERIC' }
+elsif ( 'ALPHA'    =~ /^$SORT/i ) { $SORT = 'ALPHA'   }
+elsif ( 'INPUT'    =~ /^$SORT/i ) { $SORT = 'INPUT'   }
+else { die "Unknown sort order, '$SORT'" }
+
+#---- Sort Order
+if ( $ORDER eq 'DEFAULT' ) { 
+  if    ( $SORT eq 'COUNT'   ) { $ORDER = 'DESCENDING' }
+  elsif ( $SORT eq 'ALPHA'   ) { $ORDER = 'ASCENDING'  } 
+  elsif ( $SORT eq 'NUMERIC' ) { $ORDER = 'ASCENDING'  } 
+  elsif ( $SORT eq 'INPUT'   ) { $ORDER = 'ASCENDING'  } 
+} else { 
+  if    ( 'ASCENDING'  =~ /^$ORDER/i ) { $ORDER = 'ASCENDING'  }
+  elsif ( 'DESCENDING' =~ /^$ORDER/i ) { $ORDER = 'DESCENDING' }
+}
+
+#---- Parse Columns and Split by Type
+@COLUMNS = Utility::Parse_Range(@COLUMNS);
+foreach my $col ( @COLUMNS ) { 
+  if ( Utility::Is_Positive_Integer($col) ) { push @COLUMN_INTS, $col }
+  else                                      { push @COLUMN_STRS, $col }
+}
+
+###############################################################################
+#                                                     Open and Parse Input File
+###############################################################################
+
+my %READ_OPTIONS = (
+  delimiter => $DELIMITER_COLUMNS,
+);
+my $LINES;
+if ( not defined $FILE and $READ_STDIN ) { 
+  $LINES = Utility::Text_to_Matrix([readline(STDIN)], \%READ_OPTIONS), 
+} else { 
+  $LINES = Utility::Read_Matrix($FILE, \%READ_OPTIONS);
+}
+
+
+################################################################ PARSE HEADERS
+my @HEADER = ();
+my %HEADER = ();
+
+my $found_header = 0;
+my $selected_columns = 0;
+
+if ( scalar @COLUMNS     ) { $selected_columns = 1 }
+if ( scalar @COLUMN_INTS ) { $selected_columns = 1 }
+if ( scalar @COLUMN_STRS ) { $selected_columns = 1 }
+if ( scalar @COLUMN_RGXS ) { $selected_columns = 1 }
+
+####################################### First line looks like a header
+if ( not $SKIP_HEADER ) { 
+  if ( $LINES->[0][0] =~ /^#/ ) { 
+    @HEADER = @{$LINES->[0]};
+    $HEADER[0] =~ s/^#\s*//;  # remove comment symbol
+
+    # Uppercase all headers if doing case-insensitive matching
+    if ( not $CASE_SEN_HEADERS ) { @HEADER = map { uc } @HEADER }
+
+    # Map a header -> index lookup 
+    map { $HEADER{$HEADER[$_]} = $_ } 0..$#HEADER;
+    $found_header = 1;
+  }
+}
+
+#====================================== Create dummy column names if no header line
+if ( not $found_header ) { 
+  @HEADER = map { "Column_$_" } 1..(scalar @HEADER);
+  map { $HEADER{$HEADER[$_]} = $_ } 0..$#HEADER;
+}
+    
+
+####################################### Map any user-selected columns to headers
+
+if ( $selected_columns ) { 
+  
+  #------ Verify selected indices exist
+  foreach my $c ( @COLUMN_INTS ) { 
+    my $index = $c-1;
+    if ( not defined $HEADER[$index] ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Could not find column index $c (max=" . (scalar @HEADER) . ")\n";
+      }
+      next;
+    }
+    push @COLUMN_IDXS, $index;
+  }
+
+  #------ Strings exactly matching header name
+  foreach my $c ( @COLUMN_STRS ) { 
+    if ( not $found_header ) { 
+      die "This file has no headers, so cannot match column header strings.\n";
+    }
+    if (not exists $HEADER{$c} ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Could not find column header '$c'\n";
+      }
+      next
+    }
+    push @COLUMN_IDXS, $HEADER{$c};
+  }
+
+  #------ Column headers matching regular expressions
+  foreach my $re ( @COLUMN_RGXS ) { 
+    my $matched_re = 0;
+    foreach my $header ( @HEADER ) { 
+      my $match = 0;
+      if ( $CASE_SEN_HEADERS ) { # case sensitive
+        if ( $header =~ /$re/  ) { $match = 1 }}
+      else {                         # case insensitive
+        if ( $header =~ /$re/i ) { $match = 1 }}
+      
+      if ( $match ) { 
+        push @COLUMN_IDXS, $HEADER{$header};
+        $matched_re = 1;
+      }
+    }
+    if ( not $matched_re ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Regular expression '$re' did not match any column names.\n";
+      }
+    }
+  }
+}
+
+####################################### Cleanup Headers
+
+#---- If user selected no headers, but wants separate
+#     columns, so take all of them.
+#     But must test later whether this file is a matrix.
+if ( not $selected_columns and $SEPARATE_COLUMNS ) { 
+  @COLUMN_IDXS = 0..$#HEADER;
+}
+
+#---- Sort and Uniquify
+@COLUMN_IDXS = sort { $a <=> $b } ( Utility::Unique(@COLUMN_IDXS) );
+
+
+
+
+#---- If file is supposed to be matrix, verify the width
+#     of every line to make sure it's consistent. Otherwise
+#     something is probably not going to work right.
+#     A file must be a matrix either if the user has selected
+#     columns or has requested separate columns in the output.
+#     Otherwise we should just parse every token on a line.
+my $TREAT_FILE_AS_MATRIX = 0;
+$TREAT_FILE_AS_MATRIX = 1 if scalar @COLUMN_IDXS > 0;
+$TREAT_FILE_AS_MATRIX = 1 if $SEPARATE_COLUMNS;
+my $MATRIX_WIDTH = scalar @HEADER;
+  
+
+use Data::Dumper;
+################################################################ Loop Over File
+foreach my $l (0..$#$LINES) { 
+  my $line = $LINES->[$l];
+  $COUNTS_GLOBAL{LINES_TOTAL}++;
+  chomp $line;
+  next if not @$line; # skip blank lines
+
+  #---- Decide what to do with more headers
+  next if $line->[0] =~ /^#/ and not $SKIP_HEADER;
+
+  #---- Skip empty lines
+  my $line_width = scalar @$line;
+  next if $line_width == 0;
+
+  #---- Verify line width if is matrix
+  if ( $TREAT_FILE_AS_MATRIX ) { 
+    if ( $line_width != $MATRIX_WIDTH ) { 
+      die "Lines are not consistent width ($MATRIX_WIDTH at top vs. $line_width at line $l)";
+    }
+  }
+  
+  #================ Loop over the columns
+
+  my @indecies = Utility::Range(scalar @$line);
+  @indecies = @COLUMN_IDXS if $TREAT_FILE_AS_MATRIX;
+
+  foreach my $index ( @indecies ) { 
+    my $header = $HEADER[$index];
+    my $tokens = $line->[$index];
+    next if not defined $tokens;
+    $COUNTS_COLUMN{LINES_TOTAL}[$index]++;
+  
+    #---- Further break the selected column into tokens
+    my @tokens = split /$DELIMITER_TOKENS/, $tokens;
+    foreach my $token ( @tokens ) { 
+
+      #--- Skip empty tokens
+      next if $token =~ /^\s*$/;
+
+      $COUNTS_GLOBAL{TOKENS_TOTAL}++;
+      $COUNTS_COLUMN{TOKENS_TOTAL}[$index]++;
+      if ( not $CASE_SEN_TOKENS ) { $token = uc $token }
+      next if $token !~ /$FILTER/; # Ignore strings not matchi filter
+      $COUNTS_GLOBAL{TOKENS_MATCHED}++;
+      $COUNTS_COLUMN{TOKENS_MATCHED}[$index]++;
+
+      #--- New word globally
+      if ( not exists $TOKENS{$token} ) { # Found a new word
+        push @TOKENS, $token; # Preserve order
+        $TOKENS{$token} = 0;  # For matching
+        $COUNTS_GLOBAL{TOKENS_UNIQUE}++;
+      }
+      
+      #--- New word in this column
+      if ( not exists $COUNTS_COLUMN{TOKENS}[$index]{$token} ) { 
+        $COUNTS_COLUMN{TOKENS}[$index]{$token} = 0;
+        $COUNTS_COLUMN{TOKENS_UNIQUE}[$index]++;
+      }
+
+      #--- Count the word 
+      $TOKENS{$token}++;
+      #$COUNTS_GLOBAL{TOKENS}{$token}++;
+      $COUNTS_COLUMN{TOKENS}[$index]{$token}++;
+
+    }
+  }
+}
+
+
+
+################################################### Sort and Output the Counts
+
+my @KEYS = ();
+
+#-- Most common tokens first
+if ( $SORT eq "COUNT" ) { 
+  @KEYS = sort { $TOKENS{$a} <=> $TOKENS{$b} } @TOKENS;
+
+#-- As encountered in the input
+} elsif ( $SORT eq "INPUT" ) { 
+  @KEYS = @TOKENS;
+
+#-- Numeric tokens (handles leading 0's, etc)
+} elsif ( $SORT eq "NUMERIC" ) { 
+  @KEYS = sort { $a <=> $b } @TOKENS;
+
+#-- Alphabetically
+} elsif ( $SORT eq "ALPHA" ) { 
+  @KEYS = sort { $a cmp $b } @TOKENS;
+
+#-- Unknown sort type
+} else { 
+  die "Unknown sort order '$SORT'.\n";
+}
+
+
+#---- Descending Order
+if ( $ORDER eq "DESCENDING" ) { 
+  @KEYS = reverse @KEYS;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+#--- Column Formats
+
+
+# Track longest token and column header for output formatting
+my $MAX_TOKEN_LENGTH      = 20;
+my $MAX_HEADER_LENGTH     = 10;
+foreach my $token ( @TOKENS ) {  
+  my $length = length($token); 
+  if ( $length > $MAX_TOKEN_LENGTH ) { $MAX_TOKEN_LENGTH = $length }
+}
+
+foreach my $header ( @HEADER ) { 
+  my $length = length($header); 
+  if ( $length > $MAX_TOKEN_LENGTH ) { $MAX_TOKEN_LENGTH = $length }
+}
+$MAX_TOKEN_LENGTH  += $COLUMN_PADDING;
+$MAX_HEADER_LENGTH += $COLUMN_PADDING;
+
+
+my $token_format  = "%-" . $MAX_TOKEN_LENGTH . "s";
+my $count_format  = " %" . $MAX_HEADER_LENGTH . "d";
+my $header_format = " %" . $MAX_HEADER_LENGTH . "s";
+
+if ( $OUTPUT_TABS ) { 
+  $token_format = "%s";
+  $count_format = "\t%d";
+  $header_format = "\t%d";
+}
+
+
+
+
+#---- Output Header
+my $output_header = sprintf "$token_format$header_format", "#TOKEN", "TOTAL";
+my $output_separator = "#" . '-'x($MAX_TOKEN_LENGTH+$MAX_HEADER_LENGTH);
+
+
+#---- Initialize Summary Info
+my @lines_total     = ($COUNTS_GLOBAL{LINES_TOTAL    });
+my @tokens_unique   = ($COUNTS_GLOBAL{TOKENS_UNIQUE  });
+my @tokens_matched  = ($COUNTS_GLOBAL{TOKENS_MATCHED });
+my @tokens_total    = ($COUNTS_GLOBAL{TOKENS_TOTAL   });
+
+#---- Handle Separating Out Columns
+if ( $SEPARATE_COLUMNS ) { 
+  $output_header .= join("", map { sprintf $header_format, $HEADER[$_] } @COLUMN_IDXS );
+  $output_separator .= '-' x (($MAX_HEADER_LENGTH+1) * scalar @COLUMN_IDXS);
+  push @lines_total,    map { $COUNTS_COLUMN{LINES_TOTAL   }[$_] } @COLUMN_IDXS;
+  push @tokens_unique,  map { $COUNTS_COLUMN{TOKENS_UNIQUE }[$_] } @COLUMN_IDXS;
+  push @tokens_matched, map { $COUNTS_COLUMN{TOKENS_MATCHED}[$_] } @COLUMN_IDXS;
+  push @tokens_total,   map { $COUNTS_COLUMN{TOKENS_TOTAL  }[$_] } @COLUMN_IDXS;
+}
+$output_header .= "\n";
+$output_separator .= "\n";
+print $output_header;
+
+
+#---- Print Summary Info
+if ( $PRINT_SUMMARY ) { 
+
+  my $out;
+  $out  = sprintf $token_format, "# LINES TOTAL";
+  $out .= join ('', map { sprintf $count_format, $_ } @lines_total);
+  print "$out\n";
+  
+  $out  = sprintf $token_format, "# TOKENS TOTAL";
+  $out .= join ('', map { sprintf $count_format, $_ } @tokens_total);
+  print "$out\n";
+  
+  $out  = sprintf $token_format, "# TOKENS MATCHED";
+  $out .= join ('', map { sprintf $count_format, $_ } @tokens_matched);
+  print "$out\n";
+
+  $out  = sprintf $token_format, "# TOKENS UNIQUE";
+  $out .= join ('', map { sprintf $count_format, $_ } @tokens_unique);
+  print "$out\n";
+
+
+  #printf "$token_format$count_format\n", "# LINES:",          $COUNTS_GLOBAL{LINES_TOTAL   };
+  #printf "$token_format$count_format\n", "# UNIQUE TOKENS:",  $COUNTS_GLOBAL{TOKENS_UNIQUE };
+  #printf "$token_format$count_format\n", "# MATCHED TOKENS:", $COUNTS_GLOBAL{TOKENS_MATCHED};
+  #printf "$token_format$count_format\n", "# TOTAL TOKENS:",   $COUNTS_GLOBAL{TOKENS_TOTAL  };
+  print $output_separator;
+}
+
+
+#---- Print the Counts
+foreach my $token ( @KEYS ) { 
+  my $count = $TOKENS{$token};
+  next if defined $MIN and $count < $MIN;
+  next if defined $MAX and $count > $MAX;
+  my $token_out = $token;
+  if ($QUOTE_TOKEN) { $token_out = "'$token'" }
+  printf "$token_format$count_format", $token_out, $count;
+  if ( $SEPARATE_COLUMNS ) { 
+    foreach my $index ( @COLUMN_IDXS ) { 
+      printf $count_format, $COUNTS_COLUMN{TOKENS}[$index]{$token} || 0;
+    }
+  }
+  print "\n";
+}
+
+
+
+

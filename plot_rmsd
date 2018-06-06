@@ -1,0 +1,274 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use POSIX;
+use Data::Dumper;
+
+
+my $R;
+if ( -e "/usr/bin/R" ) { $R = "/usr/bin/R" }
+else { 
+  my @ALT_RS = sort {$a =~ /R.([\w\.]+)/; my $ag = $1; 
+                     $b =~ /R.([\w\.]+)/; my $bg = $1; 
+                     $ag cmp $bg
+                    } glob ("/net/programs/R?2.*/bin/R");
+
+  die "Couldn't find a current version of R." if not @ALT_RS;
+  $R = $ALT_RS[-1];
+}
+
+print "Using R: $R\n";
+
+
+##### USAGE
+($#ARGV < 0) 
+  and die "Usage: $0 <path to rmsd.dat> \n"
+#        . "         [ps=<ps res (default 10)>]\n"
+        . "         [title=<title (default 'rmsd.png')>]\n"
+        . "         [height=<pixel height of image (default 768)>]\n"
+        . "         [width=<pixel width of image (default 1024)>]\n"
+        . "         [nolegend (turns off the legend, default on)]\n"
+        . "         [trend=<position of trend line: [center|right|left> (default center)]]\n"
+        . "         [maxrmsd=<maximum on rmsd axis (default auto determined)>]\n"
+        . "         [resolution=<resolution (default 10ps)>]\n"
+        ;
+
+
+# INPUT FILE
+
+my $pwd = `pwd`;
+chomp $pwd;
+
+# Read command line arguements.
+my $DEFAULT_FILE = 'rmsd.dat';
+my $path            = $ARGV[0] || "./$DEFAULT_FILE";
+my $resolution      =    1;
+my $title           =    0;
+my $image_height    =  768;
+my $image_width     = 1024;
+my $show_legend     =    1;
+my $text_size       =    1.0;
+my $max_rmsd        =    0;
+my $TREND           = 'center';
+
+foreach my $arg (@ARGV[1..$#ARGV]) {
+  my ($var, $val) = split '=', $arg;
+  if ( $var eq 'ps'           ) { $resolution     = $val; next; }
+  if ( $var eq 'resolution'   ) { $resolution     = $val; next; }
+  if ( $var eq 'title'        ) { $title          = $val; next; }
+  if ( $var eq 'height'       ) { $image_height   = $val; next; }
+  if ( $var eq 'width'        ) { $image_width    = $val; next; }
+  if ( $var eq 'nolegend'     ) { $show_legend    = 0;    next; }
+  if ( $var eq 'textsize'     ) { $text_size      = $val; next; }
+  if ( $var eq 'maxrmsd'      ) { $max_rmsd       = $val; next; }
+  if ( $var eq 'trend'        ) { $TREND          = $val; next; }
+
+}
+
+# separate path, current directory, and file title
+my $dir;
+my $file;
+
+
+# passed the data file itself
+if ( -e $path and not -d $path ) {
+  if ( $path =~ /^(.+)\/([^\/]+)$/ ) {
+    $dir = $1 . '/';
+    $file = $2;
+  } else {
+    $dir = `pwd`;
+    chomp $dir;
+    $dir .= '/';
+    $file = $path;
+  }
+  
+# passed a directory containing the data file
+} elsif ( -e $path and -d $path ) {
+  if ( not -e "$path/$DEFAULT_FILE" ) {
+    die "Couldn't find file '$DEFAULT_FILE' in directory '$path'.\n";
+  }
+  $dir = $path . '/';
+  $file = $DEFAULT_FILE;
+
+# passed garbage?
+} else {
+  die "Couldn't find data file in '$path'. \n";
+}
+
+print "Trying file '$dir$file'.\n";
+
+
+# set output file
+my $output_png_file = $title || 'rmsd';
+   $output_png_file =~ s/\s+/_/g;
+   $output_png_file = lc $output_png_file . ".png";
+
+# set default title
+if ( not $title ) {
+  $title = $dir;
+}
+
+print "Title = '$title'\n";
+
+
+#========================== STRIP WHITESPACE
+sub strip {
+  my $x = $_[0];
+  $x =~ s/^\s+//g;
+  $x =~ s/\s+$//g;
+  return $x;
+}
+
+
+
+####################################################################
+#                                                        CREATE PLOT
+####################################################################
+
+print "Creating R plot for RMSD.\n";
+
+
+#===== Print the R file
+
+open (ROUT,"> " . $dir . "tmp_rmsd.R") or die "Couldn't open R output file tmp_rmsd.R :$!\n";
+
+print ROUT  "
+
+  movingaverage <- function ( series, window, justification ) {
+    ma <- c(1:(length(series)-window+1))
+    for ( i in 1:length(ma) ) {
+      ma[i] <- mean ( series[ i : (i+window-1) ] ) 
+    }
+    ma
+  }
+
+  movingaverage_endpoints <- function ( series, window, justification ) {
+    len_se = length(series)
+    len_ma = len_se - window + 1
+    if ( justification == 'right' ) {
+      return ( c( len_se - len_ma + 1, len ) )
+    }
+    if ( justification == 'left' ) {
+      return ( c ( 1, len_ma ) ) 
+    } 
+    if ( justification == 'center' ) {
+      return ( c ( floor ( (window-1) / 2.0 ) + 1, len_ma + ceiling ( (window-1) / 2.0 ) - 1) )
+    }
+  }
+  
+
+  png ( width = $image_width, 
+        height=$image_height, 
+        file='" . $dir . $output_png_file . "', 
+        pointsize=16,
+       )
+
+  par(bg='white')
+  
+  # DRAW PLOT IN LEFT WINDOW
+
+  # margins for left window  (bottom, left, top, right)
+  mar.orig <- (par.orig <- par(c('mar', 'las', 'mfrow')))\$mar
+  on.exit(par(par.orig))
+  mar <- mar.orig
+  mar[2] <- mar[2] + 0.5
+  mar[4] <- 0.5
+  par(mar=mar)
+
+" 
+# insert legend - prepare layout
+. ( (not $show_legend) ? '' : "
+  layout ( matrix ( c(1,2), 1, 2, byrow=TRUE), widths=c(90,10))
+"  ) 
+# /end layout
+. "
+  # import the rmsd matrix
+  rmsd <- read.table('$dir$file')
+  rmsd <- rmsd[2:length(rmsd[,1]),] # first line is to min.pdb
+  len = length(rmsd[,1]);
+
+  # get the moving averages
+#  ma_100        <- movingaverage ( rmsd[,2], 100/$resolution  )
+#  ma_1000       <- movingaverage ( rmsd[,2], 1000/$resolution )
+#  ma_100_ends   <- movingaverage_endpoints ( rmsd[,2], 100/$resolution, '$TREND' )
+#  ma_1000_ends  <- movingaverage_endpoints ( rmsd[,2], 1000/$resolution, '$TREND' )
+
+#  length(ma_1000)
+#  ma_1000_ends
+#  ma_1000_ends[2] - ma_1000_ends[1] + 1
+
+#  length(ma_100)
+#  ma_100_ends
+#  ma_100_ends[2] - ma_100_ends[1] + 1
+
+
+ 
+  par (lwd=5)
+  min_time <- floor(min(rmsd[,1])/1000)*1000
+  max_time  <- ceiling(max(rmsd[,1])/1000)*1000
+  height <- " . ($max_rmsd ? $max_rmsd : "ceiling(max(rmsd[,2]))" ) . "
+  
+  plot.default ( c(min_time, max_time), 
+                 c(0, height), 
+                 type='n', 
+                 xlab='Time (ns)', 
+                 ylab='C-alpha RMSD (Angstroms)', 
+                 cex.main=2, 
+                 cex.axis=2, 
+                 cex.lab=2, 
+                 xaxs='i',
+                 yaxs='i',
+                 xaxt='n',
+               )
+
+  axis ( 1, at=axTicks(1), labels=axTicks(1)/1000, xaxs='i', cex.axis=2 )
+  #axis ( 1, at=seq(0,width,1000), labels=seq(0,width/1000, 1), xaxs='i' )
+
+  title(main='$title', outer=TRUE, line=-2.5, cex.main=2)
+  
+
+  # vertical lines
+  abline ( h = axTicks ( 2 ), col='black', lw=0.1 )
+  abline ( v = axTicks ( 1 ), col='black', lw=0.1 )
+
+  lines  ( rmsd[,1], rmsd[,2] )
+  par (lwd=3)
+#  lines ( rmsd[ ma_100_ends[1] : ma_100_ends[2], 1], ma_100 , col='blue' )
+#  lines ( rmsd[ ma_1000_ends[1]: ma_1000_ends[2], 1], ma_1000, col='red'  )
+
+  # RMSD 100, which we don't care about.
+  #lines ( rmsd[,1], rmsd[,3], col='green' )
+
+"
+# insert legend
+. ( (not $show_legend) ? '' : "
+  # DRAW LEGEND IN RIGHT WINDOW
+  
+  mar <- mar.orig
+  mar[1] <- 0.0
+  mar[2] <- 0.0
+  mar[3] <- 0.0
+  mar[4] <- 0.0
+  par(mar=mar)
+  par(lwd=2)
+  plot.new( )
+  
+  legend_colors = c ( 'black', 'blue', 'red' )
+  legend_values = c ( 'RMSD', '100 ps\ntrend', '1 ns\ntrend' )
+  legend ( 'center', y=NULL, legend_values, fill=legend_colors, col='black', bg='#FFFFFF', bty='n', xjust=0.5, y.intersp=2.0  )
+" ) 
+;
+
+
+close(ROUT);
+
+my $command = "$R --no-save < " . $dir . "tmp_rmsd.R > $title.result";
+#my $command = "/usr/local/bin/R --no-save < " . $dir . "tmp_rmsd.R";
+`$command`;
+
+
+
+
+

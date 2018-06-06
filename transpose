@@ -1,0 +1,40 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+my $IN;
+if ( 0 and @ARGV ) { 
+  open $IN, $ARGV[0] or die "Couldn't open input file, '$ARGV[0]'. $!";
+} else {
+  $IN = *STDIN;
+}
+
+my @matrix;
+
+my $MAX_ROW = 0;
+my $MAX_COL = 0;
+
+my $line;
+while ( defined ( $line = <$IN> ) ) {
+  $MAX_ROW ++;
+  my @line = split /\s/, $line;
+  if ( scalar @line > $MAX_COL ) { $MAX_COL = scalar @line; }
+  push @matrix, \@line;
+}
+
+
+
+for my $i ( 0..$MAX_COL - 1 ) {
+  print join "\t", map { defined $matrix[$_][$i] ? $matrix[$_][$i] : '' } 0..$MAX_ROW;
+  print "\n";
+}
+
+
+
+
+
+
+
+
+

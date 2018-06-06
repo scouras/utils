@@ -1,0 +1,376 @@
+#!/usr/bin/perl
+BEGIN { push @INC, "$ENV{CODE_BASE}/scouras" }
+use warnings;
+use strict;
+use Utility;
+use Plot;
+use POSIX;
+use Data::Dumper;
+
+my $VERBOSE = 1;
+
+my $R;
+if ( -e "/usr/bin/R" ) { $R = "/usr/bin/R" }
+else { 
+  my @ALT_RS = sort {$a =~ /R.([\w\.]+)/; my $ag = $1; 
+                     $b =~ /R.([\w\.]+)/; my $bg = $1; 
+                     $ag cmp $bg
+                    } glob ("/net/programs/R?2.*/bin/R");
+
+  die "Couldn't find a current version of R." if not @ALT_RS;
+  $R = $ALT_RS[-1];
+}
+
+print "Using R: $R\n";
+
+
+##### USAGE
+($#ARGV < 0) 
+  and die "Usage: $0 <path to lines.dat> \n"
+#        . "         [ps=<ps res (default 10)>]\n"
+        . "         [title=<title (default 'lines.png')>]\n"
+        . "         [height=<pixel height of image (default 768)>]\n"
+        . "         [width=<pixel width of image (default 1024)>]\n"
+        . "         [nolegend (turns off the legend, default on)]\n"
+        . "         [trend=<position of trend line: [center|right|left> (default center)]]\n"
+        . "         [maxy=<maximum on y axis (default auto determined)>]\n"
+        . "         [resolution=<resolution (default 10ps)>]\n"
+        . "         [data=<list of column names or indeces>]\n"
+        . "         [xlabels=<list of column to concatenate as x axis labels>]\n"
+        ;
+
+
+# INPUT FILE
+
+my $pwd = `pwd`;
+chomp $pwd;
+
+# Read command line arguements.
+my $DEFAULT_FILE = 'lines.dat';
+my $path            = $ARGV[0] || "./$DEFAULT_FILE";
+my $resolution      =    1;
+my $title           =    0;
+my $image_height    =  768;
+my $image_width     = 1024;
+my $show_legend     =    1;
+my $text_size       =    1.0;
+my $max_lines        =    0;
+my $TREND           = 'center';
+my $data_columns;
+my $xlab_columns;
+my $xlabel_orient   = 2;
+my $ylabel_orient   = 2;
+my $xtitle          = 'X';
+my $ytitle          = 'Y';
+
+foreach my $arg (@ARGV[1..$#ARGV]) {
+  my ($var, $val) = split '=', $arg;
+  if ( $var eq 'ps'           ) { $resolution     = $val; next; }
+  if ( $var eq 'resolution'   ) { $resolution     = $val; next; }
+  if ( $var eq 'title'        ) { $title          = $val; next; }
+  if ( $var eq 'height'       ) { $image_height   = $val; next; }
+  if ( $var eq 'width'        ) { $image_width    = $val; next; }
+  if ( $var eq 'nolegend'     ) { $show_legend    = 0;    next; }
+  if ( $var eq 'textsize'     ) { $text_size      = $val; next; }
+  if ( $var eq 'maxlines'     ) { $max_lines      = $val; next; }
+  if ( $var eq 'trend'        ) { $TREND          = $val; next; }
+  if ( $var eq 'data'         ) { $data_columns   = $val; next; }
+  if ( $var eq 'xlabels'      ) { $xlab_columns   = $val; next; }
+  if ( $var eq 'xtitle'       ) { $xtitle         = $val; next; }
+  if ( $var eq 'ytitle'       ) { $ytitle         = $val; next; }
+}
+
+# separate path, current directory, and file title
+my ($dir, $file);
+if ( not -e $path) { die "Cannot find data file, '$path'.\n" }
+($path, $dir, $file) = Utility::Split_Path($path);
+
+# set output file
+my $output_png_file = $title || 'lines';
+   $output_png_file =~ s/\s+/_/g;
+   $output_png_file = lc $output_png_file . ".png";
+
+# set default title
+if ( not $title ) {
+  $title = $file;
+}
+
+print "Title = '$title'\n";
+
+
+#========================== STRIP WHITESPACE
+sub strip {
+  my $x = $_[0];
+  $x =~ s/^\s+//g;
+  $x =~ s/\s+$//g;
+  return $x;
+}
+
+
+
+my @DATA = Utility::Read_Matrix($path);
+my @HEADERS = ();
+my $HAVE_HEADERS = 0;
+if ( $DATA[0][0] =~ /^#/ ) { 
+  @HEADERS = @{shift @DATA};
+  $HEADERS[0] =~ s/#//;
+  $HAVE_HEADERS = 1;
+} else { 
+  @HEADERS = 0..$#{$DATA[0]};
+}
+
+my %HEADERS = map { $HEADERS[$_] => $_ } 0..$#HEADERS;
+
+#========================== Process column and xlabel lists
+# Column indecies are assumed to be 1 indexed (as in R).
+
+#---- Data Columns
+my @data_columns = ();
+if ( not defined $data_columns ) { @data_columns = (2..@HEADERS) }
+else { 
+  my @cols = split ',', $data_columns;
+  foreach my $c ( @cols ) { 
+    my $col;
+    if ( Utility::Is_Number($c) ) { 
+      $col = $c;
+    } else { 
+      if ( not exists $HEADERS{$c} ) { die "Unknown column header $c.\n" }
+      $col = $HEADERS{$c}+1;
+    }
+    push @data_columns, $col;
+  }
+}
+
+#---- XLabel Columns
+my @xlab_columns = ();
+if ( not defined $xlab_columns ) { @xlab_columns = (1) }
+else { 
+  my @cols = split ',', $xlab_columns;
+  foreach my $c ( @cols ) { 
+    my $col;
+    if ( Utility::Is_Number($c) ) { 
+      $col = $c;
+    } else { 
+      if ( not exists $HEADERS{$c} ) { die "Unknown column header $c.\n" }
+      $col = $HEADERS{$c}+1;
+    }
+    push @xlab_columns, $col;
+  }
+}
+
+
+#---- Pretty versions of data and xlabels
+
+my %data_hash = map { ($_-1) => 1 } @data_columns;
+my %xlab_hash = map { ($_-1) => 1 } @xlab_columns;
+
+my $data_columns_string = join ',', map {$_} @data_columns;
+my $xlab_columns_string = join ',', map {$_} @xlab_columns;
+
+my @data_names = ();
+my @xlab_names = ();
+if ( $HAVE_HEADERS ) { 
+  @data_names = map { $HEADERS[$_-1] } @data_columns;
+  @xlab_names = map { $HEADERS[$_-1] } @xlab_columns;
+} else { 
+  @data_names = map { "Column $_" } @data_columns;
+  @xlab_names = map { "Column $_" } @xlab_columns;
+}
+
+my $data_names_string = join ',', map {"'$_'"} @data_names;
+my $xlab_names_string = join ',', map {"'$_'"} @xlab_names;
+
+if ( $xtitle eq 'X' ) { $xtitle = join " ", @xlab_names };
+
+#print Dumper(\@DATA);
+#my $data_min = Utility::Min( map { @$_->[@data_columns] } @DATA );
+#my $data_max = Utility::Max( map { @$_->[@data_columns] } @DATA );
+#print "MIN: $data_min\tMAX: $data_max\n";
+
+
+print "Data Headers: \n";
+foreach my $h ( 0..$#HEADERS ) { 
+  printf "%10i%5s%20s%40s%40s\n", 
+         $h+1,
+         (($xlab_hash{$h} ? 'XLab' : '' ) . ($data_hash{$h} ? 'Data' : '')),
+         $HEADERS[$h],
+         $DATA[0][$h],
+         $DATA[-1][$h],
+         ;
+}
+
+
+####################################################################
+#                                                        CREATE PLOT
+####################################################################
+
+print "Creating R plot for RMSD.\n";
+
+
+#===== Print the R file
+
+my $FILE_R = "$dir/tmp_lines.R";
+open (ROUT,">$FILE_R") or die "Couldn't open R output file $FILE_R :$!\n";
+
+print ROUT  "
+
+movingaverage <- function ( series, window, justification ) {
+  ma <- c(1:(length(series)-window+1))
+  for ( i in 1:length(ma) ) {
+    ma[i] <- mean ( series[ i : (i+window-1) ] ) 
+  }
+  ma
+}
+
+movingaverage_endpoints <- function ( series, window, justification ) {
+  len_se = length(series)
+  len_ma = len_se - window + 1
+  if ( justification == 'right' ) {
+    return ( c( len_se - len_ma + 1, len ) )
+  }
+  if ( justification == 'left' ) {
+    return ( c ( 1, len_ma ) ) 
+  } 
+  if ( justification == 'center' ) {
+    return ( c ( floor ( (window-1) / 2.0 ) + 1, len_ma + ceiling ( (window-1) / 2.0 ) - 1) )
+  }
+}
+
+
+png ( width = $image_width, 
+      height=$image_height, 
+      file='$dir/$output_png_file', 
+      pointsize=16,
+     )
+
+par(bg='white')
+
+# DRAW PLOT IN LEFT WINDOW
+
+# margins for left window  (bottom, left, top, right)
+mar.orig <- (par.orig <- par(c('mar', 'las', 'mfrow')))\$mar
+on.exit(par(par.orig))
+mar <- mar.orig
+mar[2] <- mar[2] + 1.0
+mar[4] <- 0.5
+par(mar=mar)
+
+" 
+#-------------------------------------------------------- Set Layout for Legend
+. ( (not $show_legend) ? '' : "
+layout ( matrix ( c(1,2), 1, 2, byrow=TRUE), widths=c(90,10))
+"  ) 
+
+. "
+# import the lines matrix
+lines <- read.table('$path')
+rows = length(lines[,1])
+cols = length(lines[1,])
+
+xlab_cols = c( $xlab_columns_string )
+data_cols = c( $data_columns_string )
+make_xlab <- function(x) { 
+  p=paste(x[xlab_cols], sep='', collapse=' ');
+  #print(p)
+  return(p)
+}
+xlabels = apply(lines, 1, make_xlab)
+xindex  = seq(1, rows)
+
+data_min = min(unlist(lines[,data_cols]))
+data_max = max(unlist(lines[,data_cols]))
+
+print(length(xlabels));
+print(length(xindex));
+print(rows);
+print(cols);
+print(xlabels)
+
+print(data_min)
+print(data_max)
+
+
+#---------------------------------------------------------- Get Moving Averages
+#  ma_100        <- movingaverage ( lines[,2], 100/$resolution  )
+#  ma_1000       <- movingaverage ( lines[,2], 1000/$resolution )
+#  ma_100_ends   <- movingaverage_endpoints ( lines[,2], 100/$resolution, '$TREND' )
+#  ma_1000_ends  <- movingaverage_endpoints ( lines[,2], 1000/$resolution, '$TREND' )
+
+
+#-------------------------------------------------------------- Make Empty Plot 
+  par (lwd=5)
+  
+  plot ( xindex,
+         xlim=c(1,rows),
+         ylim=c(data_min, data_max),
+         type='n', 
+         xlab='$xtitle', 
+         ylab='$ytitle', 
+         cex.main=2, 
+         cex.axis=2, 
+         cex.lab=2, 
+         xaxs='i',
+         yaxs='r', # options: i, r, s, e, d
+         xaxt='n',
+       )
+
+  axis ( 1, at=xindex[seq(1,1000,10)], labels=xlabels[seq(1,1000,10)], las=$xlabel_orient, xaxs='i', cex.axis=1.5 )
+  #axis ( 1, at=seq(0,width,1000), labels=seq(0,width/1000, 1), xaxs='i' )
+
+  title(main='$title', outer=TRUE, line=-2.5, cex.main=2)
+
+  # vertical lines
+  abline ( h = axTicks ( 2 ), col='black', lw=0.5 )
+  abline ( v = axTicks ( 1 ), col='black', lw=0.5 )
+
+
+#------------------------------------------------------------------- Plot Lines
+" . (
+  join "\n", map { 
+    ("  lines  ( xindex, lines[,$_] )", "lines[,$_]")
+  } @data_columns
+) . "
+
+
+#----------------------------------------------------------------------- Legend
+"
+. ( (not $show_legend) ? '' : "
+  # DRAW LEGEND IN RIGHT WINDOW
+  
+  mar <- mar.orig
+  mar[1] <- 0.0
+  mar[2] <- 0.0
+  mar[3] <- 0.0
+  mar[4] <- 0.0
+  par(mar=mar)
+  par(lwd=2)
+  plot.new( )
+  
+  legend_colors = c ( 'black', 'blue', 'red', 'green', 'yellow' )
+  legend_values = c ( $data_names_string )
+  legend ( 'center', 
+           y=NULL, 
+           legend_values, 
+           fill=legend_colors, 
+           col='black', 
+           bg='#FFFFFF', 
+           bty='n', 
+           xjust=0.5, 
+           y.intersp=2.0,
+         )
+
+" ) 
+;
+
+
+close(ROUT) or die "Couldn't close file $FILE_R. $!";
+
+my $command = "$R --no-save < $FILE_R";
+if ( not $VERBOSE ) { $command .= " > $title.result" }
+#my $command = "/usr/local/bin/R --no-save < " . $dir . "tmp_lines.R";
+print `$command`;
+
+
+
+
+

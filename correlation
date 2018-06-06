@@ -1,0 +1,136 @@
+#!/usr/bin/perl
+
+BEGIN { push @INC, "/Users/scouras/lab/code/scouras/", "/users/scouras/code/scouras" }
+
+use Utility qw(Find_Modes Calculate_Distribution_Statistics Normalize_Histogram Make_LogX_Histogram);
+#use POSIX;
+use warnings;
+use strict;
+use Data::Dumper;
+
+my $print_hist = 1;
+my $BINS = 100;
+my ($my_min,   $my_max  );
+my ($my_min_x, $my_max_x);
+my ($my_min_y, $my_max_y);
+my $circular = 0;
+my $condense = 0;
+my $print_stats = 1;
+my $NORMALIZE = 1;
+my $print_modes = 0;
+my $histtype = 'linear';
+
+my $width;
+
+my $header_x = 0;
+my $header_y = 0;
+
+my @FILES = grep { -e } @ARGV;
+if ( not scalar @FILES == 2 ) { die "Wrong number of files.\n"; }
+
+foreach my $arg ( @ARGV ) {
+  my ( $a, $v ) = split /\=/, $arg;
+  if ( $a eq 'nohist'   ) { $print_hist = 0;  next; }
+  if ( $a eq 'log2hist' ) { $histtype='log2'; next; }
+  if ( $a eq 'log10hist') { $histtype='log10';next; }
+  if ( $a eq 'nostats'  ) { $print_stats = 0; next; }
+  if ( $a eq 'modes'    ) { $print_modes = 1; next; }
+  if ( $a eq 'bins'     ) { $BINS = $v;       next; }
+  if ( $a eq 'width'    ) { $width=$v;        next; }
+  if ( $a eq 'min'      ) { $my_min = $v;     next; }
+  if ( $a eq 'max'      ) { $my_max = $v;     next; }
+  if ( $a eq 'minx'     ) { $my_min_x = $v;   next; }
+  if ( $a eq 'maxx'     ) { $my_max_x = $v;   next; }
+  if ( $a eq 'miny'     ) { $my_min_y = $v;   next; }
+  if ( $a eq 'maxy'     ) { $my_max_y = $v;   next; }
+  if ( $a eq 'circular' ) { $circular = 1;    next; }
+  if ( $a eq 'condense' ) { $condense = 1;    next; }
+  if ( $a eq 'headerx'  ) { $header_x = 1;    next; }
+  if ( $a eq 'headery'  ) { $header_y = 1;    next; }
+}
+
+
+#========= READ IN DATA
+
+#my @DATA1 = grep { /^[\d\.\-]+$/ } split /\s+/, `cat $FILES[0]`;
+#my @DATA2 = grep { /^[\d\.\-]+$/ } split /\s+/, `cat $FILES[1]`;
+
+my @CONTENTS1 = map { [ split /\s+/, $_ ] } split "\n", `cat $FILES[0]`;
+my @CONTENTS2 = map { [ split /\s+/, $_ ] } split "\n", `cat $FILES[1]`;
+
+my @DATA1 = ();
+my @DATA2 = ();
+
+#print Dumper (@CONTENTS1[0..5]);
+#exit;
+
+# Remove Row Headers
+if ( $header_x ) { 
+  foreach my $i ( 0..$#CONTENTS1 ) { shift @{$CONTENTS1[$i]} }
+  foreach my $i ( 0..$#CONTENTS2 ) { shift @{$CONTENTS2[$i]} }
+}
+# Remove Column Headers
+if ( $header_y ) { 
+  shift @CONTENTS1;
+  shift @CONTENTS2;
+}
+
+# Push Contents into Data
+foreach my $i ( 0..$#CONTENTS1 ) { 
+  push @DATA1, 
+    grep { /^[\d\.\-]+$/ } 
+      @{$CONTENTS1[$i]};
+}
+
+foreach my $i ( 0..$#CONTENTS2 ) { 
+  push @DATA2, 
+    grep { /^[\d\.\-]+$/ } 
+      @{$CONTENTS2[$i]};
+}
+
+
+
+if ( not scalar @DATA1 == scalar @DATA2 ) { 
+  die sprintf "Data lengths didn't match %i vs. %i\n", (scalar @DATA1), (scalar @DATA2);
+}
+
+
+
+my @HIST = ();
+
+# GET MIN/MAX/COUNT
+my $minx = Utility::Min(@DATA1);
+my $maxx = Utility::Max(@DATA1);
+my $miny = Utility::Min(@DATA2);
+my $maxy = Utility::Max(@DATA2);
+my $count = scalar @DATA1;
+
+if ( defined $my_min   ) { $my_min_x = $my_min_y = $my_min }
+if ( defined $my_max   ) { $my_max_x = $my_max_y = $my_max }
+if ( defined $my_min_x ) { $minx = $my_min_x }
+if ( defined $my_max_x ) { $maxx = $my_max_x }
+if ( defined $my_min_y ) { $miny = $my_min_y }
+if ( defined $my_max_y ) { $maxy = $my_max_y }
+
+for my $i ( 0..$#DATA1 ) { 
+  if    ( not defined $DATA1[$i] ) { undef $DATA2[$i];  }
+  elsif ( not defined $DATA2[$i] ) { undef $DATA1[$i];  }
+  elsif ( $DATA1[$i] < $minx ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA1[$i] > $maxx ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA2[$i] < $miny ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA2[$i] > $maxy ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+}
+
+#print "Dumping!\n";
+#print Dumper (@CONTENTS1);
+#print Dumper (@DATA1);
+
+#foreach my $i ( 0..$#DATA1 ) { 
+#  printf "%i\t%.4f\t%.4f\n", $i, ($DATA1[$i]||5), ($DATA2[$i]||5);
+#}
+#exit;
+
+
+
+my $cor = Utility::Correlation(\@DATA1, \@DATA2);
+printf "Correlation\t%.8f\n", $cor;

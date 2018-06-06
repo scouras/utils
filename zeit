@@ -1,0 +1,19 @@
+#!/usr/bin/python
+
+import zeit
+import argparse
+
+pa = argparse.ArgumentParser(description='Interconvert timestamps')
+pa.add_argument('value', type=str, help='A timestamp in any format')
+pa.add_argument('type', type=str, help='Target format for timestamp')
+args = pa.parse_args()
+
+value = args.value
+try:
+  value = int(value)
+except ValueError:
+  pass
+
+print type(value)
+print zeit.convert(value, args.type)
+

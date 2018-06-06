@@ -1,0 +1,407 @@
+#!/usr/bin/perl
+BEGIN { push @INC, "$ENV{CODE_BASE}/scouras" };
+
+use warnings;
+use strict;
+use Utility;
+use Plot;
+use POSIX;
+use Data::Dumper;
+
+##############################################################################
+# Plot Columns - Plot Data in Column Format
+# Alexander D Scouras
+# alexscouras@gmail.com
+#-----------------------------------------------------------------------------
+# 
+##############################################################################
+
+
+
+
+$ENV{'LC_CTYPE'} = 'en_US.UTF-8';
+$| = 1;
+
+#==== Running parameters
+my $USER = `whoami`;    chomp $USER;
+my $PWD  = `pwd`;       chomp $PWD;
+my $HOST = `hostname`;  chomp $HOST;
+my $TIME = time();
+
+my $VERBOSE = 0;
+
+
+################################################################### INITIALIZE
+
+my $CFG = Plot::Initialize('boxplot', \@ARGV);
+Plot::Auto_Detect_Data_Type($CFG);
+
+#===== Find a version of R
+my $R = Utility::Get_Exe("R", {fatal=>1});
+print "Using R: $R\n" if $CFG->{verbose} >= 2;
+
+#===== Currently unused parameters that are here for reminders
+my @FILTERS = ();
+my @BARS = ();
+my $FLIP = 0;
+
+#===================================== Set File Names
+Utility::Populate_Paths(
+  $CFG,
+  $CFG->{DIRS}{PNG}, 
+  { 
+    LOG => ( $CFG->{writelog} ? "$CFG->{FILES}{BASE}.log" : "temp_R.log" ),
+    PLT => ( $CFG->{writeplt} ? "$CFG->{FILES}{BASE}.plt" : "temp_R.plt" ),
+    RAW => ( $CFG->{writeraw} ? "$CFG->{FILES}{BASE}.raw" : "temp_R.raw" ),
+  }
+);
+
+print "Using title '$CFG->{title}'\n"
+    . "       data '$CFG->{FILES}{DATA}'\n"
+    . "       png  '$CFG->{FILES}{PNG}'\n"
+    if $CFG->{verbose} >= 1;
+
+
+#==== Generate Y Label
+# TODO: Flip Columns to Bars
+if ( $FLIP ) { 
+  my $temp = $CFG->{xlabel};
+  $CFG->{xlabel} = $CFG->{ylabel};
+  $CFG->{ylabel} = $temp;
+}
+
+
+
+
+########################################################## READ DATA
+# Data files must be processed in special ways for this program.
+# Ultimately, the parser needs to return the mean, stddev, and/or
+# stderr for each column (and subcolumn) for plotting.  The means 
+# are also output for p-value calculations, but this might need to
+# be flexible. 
+# The raw data is returned, but isn't used currently.
+
+
+my %DATA = ();
+#my %META = ();
+
+my @X_AXES = ();
+my @Y_AXES = ();
+
+my $MIN_Y = 0.0;
+my $MAX_Y = 0.0;
+
+
+{
+  my ( $data, $meta, $x_axis, $y_axis );
+  if ( $CFG->{datatype} eq 'properties' ) {
+    #my ( $data, $rows, $cols ) = 
+    #  Utility::Read_Hash_Hash ( 
+    #      $CFG->{PATHS}{DATA}, 
+    #      { transpose => 1, delimiter => '\s+' },
+    #  );
+    #foreach my $row ( @$rows ) { 
+    #  $DATA{$row}{VALUE} = $data->{$row};
+    #}
+    #@X_AXES = @$rows;
+    #@Y_AXES = ('VALUE');
+
+    my $matrix = Utility::Read_Matrix($CFG->{PATHS}{DATA});
+    foreach my $x ( 1..$#$matrix ) { 
+      foreach my $y ( 1..$#{$matrix->[$x]} ) { 
+        if ( defined $CFG->{ymin} 
+          and $matrix->[$x][$y] < $CFG->{min} ) { 
+            print "Undefining $x, $y\n";
+            $matrix->[$x][$y] = undef }
+        elsif ( defined $CFG->{ymax} 
+          and $matrix->[$x][$y] > $CFG->{max} ) { 
+            print "Undefining $x, $y\n";
+            $matrix->[$x][$y] = undef }
+      }
+    }
+
+      
+    my @core = @$matrix;
+    # skim off headers on each side
+    shift @core;
+    @core = Utility::Transpose(\@core);
+    shift @core;
+
+    my $min_data = Utility::Min(\@core);
+    my $max_data = Utility::Max(\@core);
+
+    print "Data Min: $min_data\n"
+        . "Data Max: $max_data\n"
+        ;
+
+
+    if ( $CFG->{outline} ) { 
+      $MIN_Y = $min_data;
+      $MAX_Y = $max_data;
+    } else { 
+      foreach my $row ( @core ) { 
+        my $pcnt_v = Utility::Median($row, [1, 10, 25, 50, 75, 90, 99]);
+        my $mlt = 1.5;
+        my $grc = 1.5;
+        my $p25 = $pcnt_v->[2] || $MIN_Y;
+        my $p50 = $pcnt_v->[3] || $MIN_Y;
+        my $p75 = $pcnt_v->[4] || $MIN_Y;
+        my $iqr = $p75-$p25;
+        my $min = $p50 - $iqr*$mlt*$grc;
+        my $max = $p50 + $iqr*$mlt*$grc;;
+      
+        #$min = Utility::Max($min_data, $min);
+        #$max = Utility::Min($max_data, $max);
+
+        $MIN_Y = $min if $min < $MIN_Y;
+        $MAX_Y = $max if $max > $MAX_Y;
+      }
+    }
+
+    print "MINY: $MIN_Y\n";
+    print "MAXY: $MAX_Y\n";
+    #print Dumper($pcnt_v);
+
+
+    $matrix->[0][0] = '';
+    Utility::Write_Matrix( $CFG->{PATHS}{RAW}, $matrix, { overwrite => 1, default => 'NA' } );
+
+
+
+    #print Dumper($data);
+  } else { 
+    die "Unknown data type '$CFG->{datatype}'.\n";
+  }
+  
+  #@X_AXES = sort (Utility::Unique($x_axis));
+  #@Y_AXES = reverse sort (Utility::Unique($y_axis));
+
+  if ( $CFG->{bars}) { 
+    my @TEMP = @X_AXES;
+    @X_AXES = @Y_AXES;
+    @Y_AXES = @TEMP;
+  }
+}
+
+my $X_SIZE = scalar @X_AXES;
+my $Y_SIZE = scalar @Y_AXES;
+
+#if ( $X_SIZE == 0 ) { die "X Axes have no data" }
+#if ( $Y_SIZE == 0 ) { die "Y Axes have no data" }
+
+
+
+############################################### CALCULATE STATISTICS
+
+
+#===== Determine final y scale limits
+#$MAX_Y *= 1.05;
+if ( defined $CFG->{ymin} ) { $MIN_Y = $CFG->{ymin} }
+if ( defined $CFG->{ymax} ) { $MAX_Y = $CFG->{ymax} }
+
+
+my $Z_SIZE = 1;
+
+
+##############################################################################
+#                                                                 WRITE R PLOT
+##############################################################################
+
+open R_PLOT, ">$CFG->{PATHS}{PLT}" or die "Couldn't open R plot file, '$CFG->{PATHS}{PLT}'. $!";
+
+print R_PLOT "
+#require(stats)
+options(warn=-1)
+
+# BACKGROUND COLOR, THOUGH IT WILL PROBABLY BE IGNORED
+par ( bg = '$CFG->{background}' )
+
+# PNG FILE
+png ( width     = $CFG->{width}, 
+      height    = $CFG->{height}, 
+      file      = '$CFG->{PATHS}{PNG}', 
+      pointsize = $CFG->{font_size},
+    )
+
+# MARGINS
+mar.orig <- ( par.orig <- par(c('mar', 'las', 'mfrow')))\$mar
+on.exit(par(par.orig))
+mar <- mar.orig
+mar[1] <- $CFG->{margin_bottom}
+mar[2] <- $CFG->{margin_left  }
+mar[3] <- $CFG->{margin_top   }
+mar[4] <- $CFG->{margin_right }
+par ( mar = mar )
+
+
+properties <- read.table('$CFG->{PATHS}{RAW}', header=TRUE, row.names=1)
+
+col_names   <- colnames(properties)
+row_names   <- rownames(properties)
+fix_newline <- function ( string ) gsub ( '_', ' ', string )
+#fix_newline <- function ( string ) gsub ( '_', '\\n', string )
+fix_dots    <- function ( string ) gsub ( '.', ' ', string, perl=FALSE, fixed=TRUE )
+row_names   <- sapply(sapply(row_names, fix_newline), fix_dots)
+col_names   <- sapply(sapply(col_names, fix_newline), fix_dots)
+
+properties
+
+row_names
+col_names
+
+par(lwd=1, mgp=c(6.0,1.25,0))
+base_grays <- gray( seq (0.4, 0.9, length.out=$Y_SIZE) )
+sim_grays <- gray(seq(0,1,length.out=5))
+grays <- as.vector(t(matrix(rep(base_grays, $Z_SIZE), ncol=$Z_SIZE)))
+#grays <- sim_grays
+
+
+
+#==== BAR PLOT
+#boxplot(properties)
+bp <- boxplot(as.data.frame(properties),
+                      data=NULL,
+                      notch=TRUE,
+                      axisnames=FALSE,
+                      ylim=c($MIN_Y,$MAX_Y), 
+                      col=base_grays, 
+                      outline=$CFG->{outline},
+                      xaxt='n', 
+                      yaxt='n',
+                      axes=FALSE,
+                      boxwex=0.50,
+                      staplewex=0.5,
+                      range=$CFG->{whisker_range},
+                      lwd=3.0,
+                      plot=TRUE )
+
+# X-Coordinate of the center of each bar group for X-Axis labels
+#centers = apply(x.abscis, 2, mean)
+
+#==== AXIS TICKS AND SCALE/LABELS
+
+
+par(lheight=0.75)
+axis ( 1, 
+       at       = seq(length(col_names)), #axTicks(1),
+       labels   = col_names, 
+       cex.axis = $CFG->{xscale_axis}, 
+       las      = $CFG->{xorient}, 
+       padj     = $CFG->{xjustp},
+       hadj     = $CFG->{xjusth},
+       mgp      = c(4.0, $CFG->{xshift_axis}, 0),
+     )
+
+axis ( 2, 
+       at       = axTicks(2), 
+       cex.axis = $CFG->{yscale_axis}, 
+       las      = $CFG->{yorient}, 
+       padj     = $CFG->{yjustp},
+       hadj     = $CFG->{yjusth},
+       mgp      = c(4.0, $CFG->{yshift_axis}, 0),
+     )
+
+
+#==== TITLES AND AXIS LABELS
+" . ( $CFG->{title} ? " 
+title ( main      = '$CFG->{title}', 
+        line      = $CFG->{title_shift}, 
+        xpd       = NA, 
+        cex.main  = $CFG->{title_scale}
+      )
+" : "" ) . "
+
+#---- X Label
+" . ( $CFG->{xlabel} ? "
+title ( xlab      = '$CFG->{xlabel}', 
+        line      = $CFG->{xshift_label}, 
+        xpd       = NA, 
+        cex.lab   = $CFG->{xscale_label}
+      )
+" : "" ) . "
+
+#---- Y Label
+" . ( $CFG->{ylabel} ? "
+title ( ylab      = '$CFG->{ylabel}', 
+        line      = $CFG->{yshift_label}, 
+        xpd       = NA, 
+        cex.lab   = $CFG->{yscale_label}
+      )
+" : "" ) . "
+
+";
+
+
+
+
+
+print R_PLOT <<"__PLOT__";
+#==== EXTRA BOX AROUND PLOT TO CLEAN UP 
+#box(bty='u')
+box(which='plot', lwd=5)
+
+#==== GRID LINES
+grid(nx=NA, ny=NULL, col='black', lwd=2.0)
+__PLOT__
+
+
+
+if ( $CFG->{legend} and $Y_SIZE > 1 ) { print R_PLOT <<"__LEGEND__";
+#==== LEGEND
+#col_names
+legend ( 'top', 
+         #0.1, 
+         #-$MAX_Y/10,  
+         col_names,
+         xpd=NA, 
+         cex=$CFG->{legend_text_size}, 
+         bty='n', 
+         #bty='o', 
+         horiz=$CFG->{legend_orient}, 
+         fill=base_grays,
+         inset=$CFG->{legend_inset},
+      )
+__LEGEND__
+}
+
+
+
+#------- END OF R PLOT FILE
+
+
+close R_PLOT or die "Couldn't close R plot file,' $CFG->{PATHS}{PLT}', $!";
+
+
+############################################################### EXECUTE R PLOT
+
+my $R_command = "$R --no-save < $CFG->{PATHS}{PLT} 2>&1";
+my $R_result = `$R_command`;
+
+open R_LOG, ">$CFG->{PATHS}{LOG}" or die "Couldn't open R log file. $!";
+print R_LOG $R_result;
+close R_LOG or die "Couldn't close R log file. $!";
+
+
+################################################################ VALIDATE PLOT
+#---- Plotting Error
+if ( $R_result =~ /^Error:/ ) { 
+  die "Error in R plotting\n$R_result";
+}
+
+#---- PNG not created
+if ( not -e $CFG->{PATHS}{PNG} ) { 
+  die "Failed to plot image, '$CFG->{PATHS}{PNG}'\n$R_result";
+}
+
+#---- P Values not created
+if ( $CFG->{pvalues} and not -e $CFG->{PATHS}{PVL} ) { 
+  die "Failed to calculate p-values', '$CFG->{PATHS}{PVL}'\n$R_result";
+}
+
+#---- Print results if verbose
+print $R_result if $CFG->{verbose} > 0;
+
+
+
+
+

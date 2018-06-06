@@ -1,0 +1,378 @@
+#!/usr/bin/perl
+BEGIN { push @INC, "$ENV{CODE_BASE}/scouras" };
+
+use warnings;
+use strict;
+use Utility;
+use Plot;
+use POSIX;
+use Data::Dumper;
+
+##############################################################################
+# Plot Columns - Plot Data in Column Format
+# Alexander D Scouras
+# alexscouras@gmail.com
+#-----------------------------------------------------------------------------
+# 
+##############################################################################
+
+
+
+
+$ENV{'LC_CTYPE'} = 'en_US.UTF-8';
+$| = 1;
+
+#==== Running parameters
+my $USER = `whoami`;    chomp $USER;
+my $PWD  = `pwd`;       chomp $PWD;
+my $HOST = `hostname`;  chomp $HOST;
+my $TIME = time();
+
+my $VERBOSE = 1;
+
+
+################################################################### INITIALIZE
+
+my $CFG = Plot::Initialize('lines', \@ARGV);
+#Plot::Auto_Detect_Data_Type($CFG);
+
+#===== Find a version of R
+my $R = Utility::Get_Exe("R", {fatal=>1});
+print "Using R: $R\n" if $CFG->{verbose} >= 2;
+
+#===== Currently unused parameters that are here for reminders
+#      TODO: Enable selection of selected column names for plotting
+#            see plot_lines_original for example
+my @FILTERS = ();
+
+#===================================== Set File Names
+Utility::Populate_Paths(
+  $CFG,
+  $CFG->{DIRS}{PNG}, 
+  { 
+    LOG => ( $CFG->{writelog} ? "$CFG->{FILES}{BASE}.log" : "temp_R.log" ),
+    RAW => ( $CFG->{writeraw} ? "$CFG->{FILES}{BASE}.raw" : "temp_R.raw" ),
+    PLT => ( $CFG->{writeplt} ? "$CFG->{FILES}{BASE}.plt" : "temp_R.plt" ),
+  }
+);
+
+print "Using title '$CFG->{title}'\n"
+    . "       data '$CFG->{FILES}{DATA}'\n"
+    . "       png  '$CFG->{FILES}{PNG}'\n"
+    if $CFG->{verbose} >= 1;
+
+
+
+
+#################################################################### READ DATA
+
+my %DATA   = ();
+
+{
+  my ( $data, $rows, $cols ) = 
+    Utility::Read_Hash_Hash ( 
+        $CFG->{PATHS}{DATA}, 
+        { transpose => $CFG->{transpose}, 
+          delimiter => $CFG->{delimeter} },
+     );
+
+  %DATA = %$data;
+  $CFG->{xaxes} = $rows;
+  $CFG->{yaxes} = $cols;
+  $CFG->{data } = $data;
+
+  foreach my $x ( @$rows ) { 
+    delete $DATA{$x}{$cols->[0]};
+  }
+  shift @$cols;
+}
+
+
+#$CFG->{xmin_data} = Utility::Min(\%DATA);
+#$CFG->{xmax_data} = Utility::Max(\%DATA);
+
+$CFG->{ymin_data} = Utility::Min(\%DATA);
+$CFG->{ymax_data} = Utility::Max(\%DATA);
+
+if ( not defined $CFG->{ymin} or $CFG->{ymin} eq 'None' ) { $CFG->{ymin} = $CFG->{ymin_data} * 0.95 }
+if ( not defined $CFG->{ymax} or $CFG->{ymin} eq 'None' ) { $CFG->{ymax} = $CFG->{ymax_data} * 1.05 }
+
+$CFG->{xsize} = scalar @{$CFG->{xaxes}};
+$CFG->{ysize} = scalar @{$CFG->{yaxes}};
+
+if ( $CFG->{xsize} == 0 ) { die "X Axes have no data" }
+if ( $CFG->{ysize} == 0 ) { die "Y Axes have no data" }
+
+
+
+############################################################ FORMAT DATA FOR R
+
+print "Opening R Data file $CFG->{PATHS}{RAW}\n" if $CFG->{verbose} > 2;
+open R_RAW, ">$CFG->{PATHS}{RAW}" or die "Couldn't open R data file, '$CFG->{PATHS}{RAW}'. $!";
+print R_RAW ((join "\t", @{$CFG->{yaxes}}) . "\n");
+foreach my $x ( @{$CFG->{xaxes}} ) { 
+  print R_RAW $x;
+  foreach my $y ( @{$CFG->{yaxes}} ) { 
+    printf R_RAW "\t%f", $DATA{$x}{$y};
+  }
+  print R_RAW "\n";
+}
+close R_RAW or die "Couldn't close R data file, '$CFG->{PATHS}{RAW}'. $!";
+
+
+######################################################### DETERMINE AXIS TYPES
+
+$CFG->{yaxis_type} = 'DATA';
+Plot::Determine_Axis_Parameters($CFG, 'x', $CFG->{xaxes});
+Plot::Determine_Axis_Parameters($CFG, 'y', $CFG->{yaxes});
+
+
+
+print "Configuration Object:\n"
+    . Dumper($CFG)
+    . "\n\n";
+
+
+
+##############################################################################
+#                                                                 WRITE R PLOT
+##############################################################################
+
+open R_PLOT, ">$CFG->{PATHS}{PLT}" or die "Couldn't open R plot file, '$CFG->{PATHS}{PLT}'. $!";
+
+print R_PLOT "
+
+#=============================================================== CONFIGURATION
+options(warn=-1)
+
+#================= BACKGROUND COLOR
+par ( bg = '$CFG->{background}' )
+
+#================= PNG FILE
+png ( width     =  $CFG->{width}, 
+      height    =  $CFG->{height}, 
+      file      = '$CFG->{PATHS}{PNG}', 
+      pointsize =  $CFG->{font_size},
+    )
+
+#================= MARGINS
+mar.orig <- ( par.orig <- par(c('mar', 'las', 'mfrow')))\$mar
+on.exit(par(par.orig))
+mar <- mar.orig
+mar[1] <- $CFG->{margin_bottom}
+mar[2] <- $CFG->{margin_left  }
+mar[3] <- $CFG->{margin_top   }
+mar[4] <- $CFG->{margin_right }
+par ( mar = mar )
+
+#=================================================================== READ DATA
+
+data_full <- read.table('$CFG->{PATHS}{RAW}', header=TRUE, row.names=1)
+data <- as.matrix(array(data_full, dimnames=NULL))
+#data <- as.matrix(data_full[1:$CFG->{xsize},1:$CFG->{ysize}])
+#data   <- as.matrix(array(  z, dimnames=NULL))
+
+x <- seq ( 0, length(data_full[,1] ) )
+y <- seq ( 0, length(data_full[1,] ) )
+
+x
+y
+
+x_labels <- $CFG->{xaxis_labels_R}
+y_labels <- $CFG->{yaxis_labels_R}
+
+" . ( $CFG->{xaxis_type} eq 'AXIS' ? "x <- x_labels" : "") . "
+" . ( $CFG->{yaxis_type} eq 'AXIS' ? "y <- y_labels" : "") . "
+
+
+
+#================= PARSE ROW/COL NAMES
+
+#row.names(data_mean) <- rownames(data_full)
+##col.names(data_mean) <- rownames(data_full)[1:$CFG->{ysize}]
+#col_names   <- colnames(data_mean)
+#row_names   <- rownames(data_mean)
+#fix_newline <- function ( string ) gsub ( '_', ' ', string )
+##fix_newline <- function ( string ) gsub ( '_', '\\n', string )
+#fix_dots    <- function ( string ) gsub ( '.', ' ', string, perl=FALSE, fixed=TRUE )
+#row_names   <- sapply(row_names, fix_newline)
+#col_names   <- sapply(col_names, fix_dots)
+#
+#data_full
+#data_mean
+#
+#row_names
+#col_names
+
+#================================================================= COLORSCHEME
+
+base_grays <- gray( seq (0.4, 0.9, length.out=$CFG->{ysize}) )
+#sim_grays <- gray(seq(0,1,length.out=5))
+#grays <- sim_grays
+
+colors = base_grays
+
+#=================================================================== MAIN PLOT
+
+#================= Outline Plot
+
+par(lwd=1, mgp=c(4.0,1.25,0))
+
+#================= BASE PLOT
+
+plot ( x, 
+       #xlim=c(1,rows),
+       ylim=c($CFG->{ymin}, $CFG->{ymax}),
+       type='n', 
+       xaxs='i',
+       yaxs='r', # options: i, r, s, e, d
+       xaxt='n',
+       yaxt='s', 
+       #yaxt='n', 
+     )
+
+
+#================= LINES
+
+rowcount = $CFG->{ysize}
+
+print(data)
+
+for ( i in 2:rowcount ) {
+
+  print((data[,i]))
+
+  #lines ( x,
+  lines ( 
+          data[,i],
+          type  = 'l',
+          lwd   = 4.0,
+          lty   = 1, 
+        )
+}
+
+
+
+#================= AXES, GRIDLINES, AND SCALE/LABELS
+
+par(lheight=0.75) # line height multiplier for newline spacing
+
+" 
+. Plot::R_Axes_and_Gridlines($CFG, 'x', 'x', 'x_labels')
+#. Plot::R_Axes_and_Gridlines($CFG, 'y', 'y', 'y_labels')
+. "
+
+#axis ( 1, 
+#       at       = x, 
+#       labels   = row_names, 
+#       cex.axis = $CFG->{xscale_axis}, 
+#       #line     = $CFG->{xshift_axis},
+#       #pos      = 0,
+#       las      = $CFG->{xorient}, 
+#       padj     = $CFG->{xjustp},
+#       hadj     = $CFG->{xjusth},
+#       mgp      = c(4.0, $CFG->{xshift_axis}, 0),
+#     )
+#
+#axis ( 2, 
+#       at       = axTicks(2), 
+#       cex.axis = $CFG->{yscale_axis}, 
+#       las      = $CFG->{yorient}, 
+#       padj     = $CFG->{yjustp},
+#       hadj     = $CFG->{yjusth},
+#       mgp      = c(4.0, $CFG->{yshift_axis}, 0),
+#     )
+
+
+
+" 
+#================= MAIN TITLE AND AXIS LABELS
+. Plot::R_Title_and_Labels('title', $CFG)
+. Plot::R_Title_and_Labels('x',     $CFG)
+. Plot::R_Title_and_Labels('y',     $CFG)
+. "
+
+##==== TITLES AND AXIS LABELS
+#" . ( $CFG->{title} ? " 
+#title ( main      = '$CFG->{title}', 
+#        line      = $CFG->{title_shift}, 
+#        xpd       = NA, 
+#        cex.main  = $CFG->{title_scale}
+#      )
+#" : "" ) . "
+#
+##---- X Label
+#" . ( $CFG->{xlabel} ? "
+#title ( xlab      = '$CFG->{xlabel}', 
+#        line      = $CFG->{xshift_label}, 
+#        xpd       = NA, 
+#        cex.lab   = $CFG->{xscale_label}
+#      )
+#" : "" ) . "
+#
+##---- Y Label
+#" . ( $CFG->{ylabel} ? "
+#title ( ylab      = '$CFG->{ylabel}', 
+#        line      = $CFG->{yshift_label}, 
+#        xpd       = NA, 
+#        cex.lab   = $CFG->{yscale_label}
+#      )
+#" : "" ) . "
+#
+#x.abscis_vec <- as.vector(x.abscis)
+
+#==== EXTRA BOX AROUND PLOT TO CLEAN UP 
+box(bty='u')
+
+#==== GRID LINES
+#grid(nx=NA, ny=NULL, col='black', lwd=2.0)
+
+";
+
+
+#================= LEGEND
+
+if ( $CFG->{legend} and $CFG->{ysize} > 1 ) { 
+  #print R_PLOT Plot::R_Legend_Standard($CFG, 'y');  
+}
+
+
+#------- END OF R PLOT FILE
+
+
+close R_PLOT or die "Couldn't close R plot file,' $CFG->{PATHS}{PLT}', $!";
+
+
+############################################################### EXECUTE R PLOT
+
+my $R_command = "$R --no-save < '$CFG->{PATHS}{PLT}' 2>&1";
+my $R_result = `$R_command`;
+
+open R_LOG, ">$CFG->{PATHS}{LOG}" or die "Couldn't open R log file. $!";
+print R_LOG $R_result;
+close R_LOG or die "Couldn't close R log file. $!";
+
+
+################################################################ VALIDATE PLOT
+#---- Plotting Error
+if ( $R_result =~ /error/i ) { 
+  die "Error in R plotting\n$R_result";
+}
+
+#---- PNG not created
+if ( not -e $CFG->{PATHS}{PNG} ) { 
+  die "Failed to plot image, '$CFG->{PATHS}{PNG}'\n$R_result";
+}
+
+#---- P Values not created
+if ( $CFG->{pvalues} and not -e $CFG->{PATHS}{PVL} ) { 
+  die "Failed to calculate p-values', '$CFG->{PATHS}{PVL}'\n$R_result";
+}
+
+#---- Print results if verbose
+print $R_result if $CFG->{verbose} > 0;
+
+
+
+
+

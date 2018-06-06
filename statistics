@@ -1,0 +1,808 @@
+#!/usr/bin/perl
+BEGIN { push @INC, "$ENV{CODE_BASE}/scouras" }
+use Utility;
+use Getopt::Long;
+use Data::Dumper;
+use Date::Parse;
+use warnings;
+use strict;
+
+
+
+###############################################################################
+#                   Statistics and Histogram of a File
+#------------------------------------------------------------------------------
+# Alexander D. Scouras
+# alexscouras@gmail.com
+# Created: 15 Sept 2012
+# Modified: 9 April 2013
+#------------------------------------------------------------------------------
+# TODO: Add subaveraging of tokens within a column.
+#------------------------------------------------------------------------------
+my $HELP_LONG = << '__HELP_LONG__';
+Given a file (white-space delimited matrix), split the data into tokens
+by space or optional delimiters.  Can select columns from the matrix either
+by number or by the column header. Token matching and column header matching
+are both case-insensitive by default, but see option flags.
+
+-h makes column header matching case-sensitive
+
+Delimiter is a regular expression that can split columns into more tokens,
+allowing you to say select columns with column separated lists, then count
+the tokens in those lists.  
+
+-min and -max filter the values considered in the matrix
+
+
+__HELP_LONG__
+
+#------------------------------------------------------------------------------
+my $HELP_OPTIONS = << '__HELP_OPTIONS__';
+  Output Options:
+    -p  --separate          | track and output each column separately
+    -l  --localonly         | don't output global calculation
+        --stats             | output statistics (negatable)
+        --histogram         | output histogram  (negatable)
+        --modes             | output modes of histogram (negatable)
+        --normalize         | normalize histogram (negatable)
+        --scale             | histogram scale (linear, log2, log10)
+        --precision=FLOAT   | histogram precision
+
+        --bins              | number of bins in histogram
+        --width             | width of each histogram bin
+                            | (bin width overrides bin count)
+
+        --circular          | circular statistics for modes
+        --condense          | condense all values over maximum to maximum bin (I think)
+
+    -m  --correlationmatrix | compute the correlation between each column
+
+        --percentiles       | list of floats for percentile statistics
+  
+  Column Selection Options (can mix and call repeatedly)
+    -c  --columns=COLUMNS   | mixed list of INTs, RANGEs, and STRINGs
+                            | -c 1 -c 5-10 -c 5,7,9,10-30 -c 1-5,FOO,BAR,12
+    -cs --col-string=STRING | matches single column header without parsing string
+                            | useful if headers have ',', '-', or are integers
+                            | these each match a single column header
+                            | -cs A -cs B -cs a,b,c -cs 1 -cs 100-1000
+    -cr --col-regex=REGEX   | matches multiple headers (one regex per option)
+                            | -cr '^IPA.*'
+  
+  Filters:
+        --min=FLOAT         | ignore values below this
+        --max=FLOAT         | ignore values above this
+        --histmin=FLOAT     | minimum histogram bin
+        --histmax=FLOAT     | maximum histogram bin
+
+  Delimiters:
+    -d  --del-columns=REGEX | column delimiter (default '\t')
+    -e  --del-tokens=REGEX  | token delimiter (default /\s+/)
+
+  Flags:
+    -i  --stdin             | read from stdin
+    -1  --header            | treat first line as a header, even without #
+    -y  --verify            | verify that every cell has a value
+    -s  --skip-blanks       | ignore null values in matrix
+    -h  --case-sen-headers  | match case for column headers
+    -w  --whitespace        | split columns on whitespace
+    -b  --tab-output        | tab-delimited output columns (default space)
+    -?  --help              | print an even help file
+
+__HELP_OPTIONS__
+
+
+###############################################################################
+
+
+
+######################################################################### Usage
+sub usage { 
+
+  print "Calculate basic statistics and histograms on a column or matrix\n"
+      . "count <file> <options>\n"
+      ;
+   
+  print $HELP_OPTIONS;
+  if ( $_[0] and $_[0] eq 'LONG' ) { print $HELP_LONG }
+  
+  exit;
+}
+
+if ( scalar @ARGV == 0 ) { &usage }
+
+
+############################################################## Global Variables
+
+# TODO: implement delword, delcolumn, ignore-case
+
+#--- Data Structures
+my @COLUMN_DATA = ();
+my %GLOBAL_DATA = (
+    ROWS_TOTAL     =>  0,
+    VALUES_TOTAL    =>  0,
+    VALUES_MATCHED  =>  0,
+    VALUES_UNIQUE   =>  0,
+    VALUES          => [],
+);
+
+#--- Flags
+my $CASE_SEN_HEADERS      = 0;
+my $OUTPUT_TABS           = 0;
+my $OUTPUT_SIMPLE         = 0;
+my $SEPARATE_COLUMNS      = 0;
+my $VERIFY_HEADERS        = 0;
+my $SKIP_BLANKS           = 0;
+my $SKIP_HEADER           = 0;
+my $FORCE_HEADER          = 0;
+
+my $OUTPUT_STATS          = 1;
+my $OUTPUT_HISTOGRAM      = 1;
+my $OUTPUT_MODES          = 0;
+my $NORMALIZE_HISTOGRAM   = 0;
+
+my $NO_GLOBAL             = 0;
+my $CORRELATION_MATRIX    = 0;
+my $READ_STDIN            = 0;
+
+my $VERIFY_VALUES         = 0;
+
+my @PERCENTILES_DEFAULT   = (10, 25, 50, 75, 90);
+my @PERCENTILES           = ();
+
+#--- Options
+my $DELIMITER_TOKENS      = '\s+';
+my $DELIMITER_COLUMNS     = '\t';
+my $COLUMN_PADDING        =  4;
+my @COLUMNS               = ();
+my @COLUMN_INTS           = ();
+my @COLUMN_STRS           = ();
+my @COLUMN_RGXS           = ();
+my @COLUMN_IDXS           = ();
+my $FILTER_MIN;
+my $FILTER_MAX;
+my $HISTOGRAM_MIN;
+my $HISTOGRAM_MAX;
+my $PARSE_DATES           =   0;
+
+my $OUTPUT_PRECISION      =   4;
+
+my $HISTOGRAM_SCALE       = 'linear';
+my $BIN_WIDTH             = 1.0;
+my $BIN_COUNT             = undef;
+
+my $CIRCULAR              =   0;
+my $CONDENSE              =   0;
+
+####################################### Parse Command Line
+
+my $result = 
+GetOptions(
+          "separate|p"        => \$SEPARATE_COLUMNS,
+          "stats!"            => \$OUTPUT_STATS,
+          "histogram!"        => \$OUTPUT_HISTOGRAM,
+          "modes!"            => \$OUTPUT_MODES,
+          "normalize!"        => \$NORMALIZE_HISTOGRAM,
+
+          "scale:s"           => \$HISTOGRAM_SCALE,
+          "precision:f"       => \$OUTPUT_PRECISION,
+          "correlation|m"     => \$CORRELATION_MATRIX,
+           
+          "columns|c:s"       => \@COLUMNS,
+          #"columns_int|ci:i"      => \@COLUMN_INTS,
+          "column_str|cs:s"      => \@COLUMN_STRS,
+          "column_rgx|cr:s"      => \@COLUMN_RGXS,
+          
+          "d|delcolumns:s"    => \$DELIMITER_COLUMNS,
+          "e|deltokens:s"     => \$DELIMITER_TOKENS,
+          "i|stdin"           => \$READ_STDIN,
+
+          "l|local_only"      => \$NO_GLOBAL,
+         
+          "min:f"             => \$FILTER_MIN,
+          "max:f"             => \$FILTER_MAX,
+          "histmin:f"         => \$HISTOGRAM_MIN,
+          "histmax:f"         => \$HISTOGRAM_MAX,
+          "width:f"           => \$BIN_WIDTH,
+          "bins:i"            => \$BIN_COUNT,
+
+          "t|percentiles:f"   => \@PERCENTILES,
+          
+          "circular"          => \$CIRCULAR,
+          "condense"          => \$CONDENSE,
+          
+          "a|padding:i"       => \$COLUMN_PADDING,
+           
+          "dates"             => sub { $PARSE_DATES = 1 },
+          "headercase"        => \$CASE_SEN_HEADERS,
+          "1|header"          => \$FORCE_HEADER,
+          "b|taboutput"       => \$OUTPUT_TABS,
+          "y|verifyheaders"   => \$VERIFY_HEADERS,
+          "v|verifyvalues"    => \$VERIFY_VALUES,
+          "s|skip_blanks"     => \$SKIP_BLANKS,
+          #"k|skipheader"     => \$SKIP_HEADER,
+          "w|whitesspace"     => sub { $DELIMITER_COLUMNS = '\s+' },
+          "help|?|h"          => sub { usage('LONG') },
+
+
+
+
+         );
+
+my $FILE = $ARGV[0];
+
+
+#========= Set Sensible Defaults
+
+#---- Validate Range
+
+my $HISTOGRAM_RANGE;
+my $FILTER_RANGE;
+if ( defined $HISTOGRAM_MIN and defined $HISTOGRAM_MAX ) { 
+  $HISTOGRAM_RANGE = $HISTOGRAM_MAX - $HISTOGRAM_MIN;
+  if ( $HISTOGRAM_RANGE <= 0 ) { 
+    die "Histogram range is not positive ($HISTOGRAM_RANGE): $HISTOGRAM_MIN - $HISTOGRAM_MAX\n";
+  }
+}
+
+if ( defined $FILTER_MIN and defined $FILTER_MAX ) { 
+  $FILTER_RANGE = $FILTER_MAX - $FILTER_MIN;
+  if ( $FILTER_RANGE <= 0 ) { 
+    die "Filter range is not positive ($FILTER_RANGE): $FILTER_MIN - $FILTER_MAX\n";
+  }
+}
+
+
+#---- Finalize Percentiles
+if ( not scalar @PERCENTILES ) { @PERCENTILES = @PERCENTILES_DEFAULT }
+@PERCENTILES = sort { $a <=> $b } @PERCENTILES;
+foreach my $p ( @PERCENTILES ) { 
+  if ( $p < 0.0 or $p > 100.0 ) { 
+    die "Percentile '$p' is not in range 0-100\n";
+  }
+}
+
+
+#---- Parse Columns and Split by Type
+@COLUMNS = Utility::Parse_Range(@COLUMNS);
+foreach my $col ( @COLUMNS ) { 
+  if ( Utility::Is_Positive_Integer($col) ) { push @COLUMN_INTS, $col }
+  else                                      { push @COLUMN_STRS, $col }
+}
+
+###############################################################################
+#                                                     Open and Parse Input File
+###############################################################################
+
+my %READ_OPTIONS = (
+  delimiter => $DELIMITER_COLUMNS,
+);
+my $MATRIX;
+if ( not defined $FILE and $READ_STDIN ) { 
+  $MATRIX = Utility::Text_to_Matrix([readline(STDIN)], \%READ_OPTIONS), 
+} else { 
+  $MATRIX = Utility::Read_Matrix($FILE, \%READ_OPTIONS);
+}
+
+
+
+###############################################################################
+#                                                                 PARSE HEADERS
+###############################################################################
+my @HEADER = ();
+my %HEADER = ();
+
+my $found_header = 0;
+my $selected_columns = 0;
+
+if ( scalar @COLUMNS     ) { $selected_columns = 1 }
+if ( scalar @COLUMN_INTS ) { $selected_columns = 1 }
+if ( scalar @COLUMN_STRS ) { $selected_columns = 1 }
+if ( scalar @COLUMN_RGXS ) { $selected_columns = 1 }
+
+####################################### First line looks like a header
+if ( not $SKIP_HEADER ) { 
+  if ( $FORCE_HEADER or $MATRIX->[0][0] =~ /^#/ ) { 
+    @HEADER = @{$MATRIX->[0]};
+    $HEADER[0] =~ s/^#\s*//;  # remove comment symbol
+
+    # Uppercase all headers if doing case-insensitive matching
+    if ( not $CASE_SEN_HEADERS ) { @HEADER = map { uc } @HEADER }
+
+    # Map a header -> index lookup 
+    map { $HEADER{$HEADER[$_]} = $_ } 0..$#HEADER;
+    $found_header = 1;
+  }
+}
+
+#====================================== Create dummy column names if no header line
+if ( not $found_header ) { 
+  @HEADER = map { "Column_$_" } 1..(scalar @HEADER);
+  map { $HEADER{$HEADER[$_]} = $_ } 0..$#HEADER;
+}
+    
+
+###############################################################################
+#                                                   MAP USER COLUMNS TO HEADERS
+###############################################################################
+
+if ( $selected_columns ) { 
+  
+  #------ Verify selected indices exist
+  foreach my $c ( @COLUMN_INTS ) { 
+    my $index = $c-1;
+    if ( not defined $HEADER[$index] ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Could not find column index $c (max=" . (scalar @HEADER) . ")\n";
+      }
+      next;
+    }
+    push @COLUMN_IDXS, $index;
+  }
+
+  #------ Strings exactly matching header name
+  foreach my $c ( @COLUMN_STRS ) { 
+    if ( not $found_header ) { 
+      die "This file has no headers, so cannot match column header strings.\n";
+    }
+    if ( not $CASE_SEN_HEADERS ) { $c = uc $c }
+    if (not exists $HEADER{$c} ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Could not find column header '$c'\n"
+          . "Valid headers are: \n" 
+          . "  " . (join ',', @HEADER) . "\n"
+          ;
+      }
+      next
+    }
+    push @COLUMN_IDXS, $HEADER{$c};
+  }
+
+  #------ Column headers matching regular expressions
+  foreach my $re ( @COLUMN_RGXS ) { 
+    my $matched_re = 0;
+    foreach my $header ( @HEADER ) { 
+      my $match = 0;
+      if ( $CASE_SEN_HEADERS ) { # case sensitive
+        if ( $header =~ /$re/  ) { $match = 1 }}
+      else {                         # case insensitive
+        if ( $header =~ /$re/i ) { $match = 1 }}
+      
+      if ( $match ) { 
+        push @COLUMN_IDXS, $HEADER{$header};
+        $matched_re = 1;
+      }
+    }
+    if ( not $matched_re ) { 
+      if ( $VERIFY_HEADERS ) { 
+        die "Regular expression '$re' did not match any column names.\n";
+      }
+    }
+  }
+}
+
+####################################### Cleanup Headers
+
+#---- If user selected no headers, but wants separate
+#     columns, so take all of them.
+#     But must test later whether this file is a matrix.
+if ( not $selected_columns and $SEPARATE_COLUMNS ) { 
+  @COLUMN_IDXS = 0..$#HEADER;
+}
+
+#---- Sort and Uniquify Column Selection
+@COLUMN_IDXS = sort { $a <=> $b } ( Utility::Unique(@COLUMN_IDXS) );
+$GLOBAL_DATA{HEADER} = 'GLOBAL';
+foreach my $index ( @COLUMN_IDXS ) { 
+  $COLUMN_DATA[$index]{INDEX} = $index;
+  $COLUMN_DATA[$index]{HEADER} = $HEADER[$index];
+}
+
+#---- If file is supposed to be matrix, verify the width
+#     of every line to make sure it's consistent. Otherwise
+#     something is probably not going to work right.
+#     A file must be a matrix either if the user has selected
+#     columns or has requested separate columns in the output.
+#     Otherwise we should just parse every token on a line.
+my $TREAT_FILE_AS_MATRIX = 0;
+$TREAT_FILE_AS_MATRIX = 1 if scalar @COLUMN_IDXS > 0;
+$TREAT_FILE_AS_MATRIX = 1 if $SEPARATE_COLUMNS;
+my $MATRIX_WIDTH = scalar @HEADER;
+
+#print "LIST: " . Dumper(\@HEADER); 
+#print "HASH: " . Dumper(\%HEADER);
+#exit;
+ 
+ 
+  
+###############################################################################
+#                                                                 PARSE MATRIX
+###############################################################################
+foreach my $r (0..$#$MATRIX) { 
+  my $row = $MATRIX->[$r];
+  $GLOBAL_DATA{ROWS_TOTAL}++;
+
+  #---- Decide what to do with more headers
+  next if $row->[0] =~ /^#/ and not $SKIP_HEADER;
+
+  #---- Skip empty rows
+  my $columns = scalar @$row;
+  next if $columns == 0;
+
+  #---- Verify column count if is matrix
+  if ( $TREAT_FILE_AS_MATRIX and not $SKIP_BLANKS) { 
+    if ( $columns != $MATRIX_WIDTH ) { 
+      die "Rows are not consistent widths ($MATRIX_WIDTH at top vs. $columns at row $r)";
+    }
+  }
+  
+  #================ Loop over the columns
+
+  my @indecies = Utility::Range(scalar @$row);
+  @indecies = @COLUMN_IDXS if $TREAT_FILE_AS_MATRIX;
+
+  foreach my $index ( @indecies ) { 
+    my $header = $HEADER[$index];
+    my $tokens = $row->[$index];
+    next if not defined $tokens;
+    $COLUMN_DATA[$index]{ROWS_TOTAL}++;
+  
+    #---- Further break the selected column into tokens
+    my @values = split /$DELIMITER_TOKENS/, $tokens;
+    foreach my $v ( 0..$#values ) { 
+      my $value = $values[$v];
+      if ($PARSE_DATES) { $value = str2time($value) }
+
+      my $is_blank  = $value =~ /^\s*$/;
+      my $is_number = Utility::Is_Number($value);
+
+      #--- Verify/Skip empty values
+      if ( $VERIFY_VALUES ) { 
+        if ( $is_blank) { 
+          die "Empty value for row $r, column $header, value $v\n";
+        } elsif ( not $is_number ) { 
+          die "Not a number ($value) for row $r, column $header, value $v\n";
+        }
+      } elsif ( $is_blank or (not $is_number) ) { 
+        next; 
+      }
+
+      #--- Filter Values
+      next if defined $FILTER_MIN and $value < $FILTER_MIN;
+      next if defined $FILTER_MAX and $value > $FILTER_MAX;
+
+
+      #--- Save the Values
+      $GLOBAL_DATA{VALUES_TOTAL}++;
+      $COLUMN_DATA[$index]{VALUES_TOTAL}++;
+
+      push @{$GLOBAL_DATA{VALUES}}, $value; # Preserve order
+      push @{$COLUMN_DATA[$index]{VALUES}}, $value;
+
+    }
+  }
+}
+
+
+############################################################ PERFORM STATISTICS
+
+#--- Quick post check for bad columns that never got a value
+my @BAD_COLUMNS = ();
+my @CORR_COLUMNS = ();
+my @new_columns = ();
+for my $c ( @COLUMN_IDXS ) { 
+  if ( not defined $COLUMN_DATA[$c]{VALUES} ) { 
+    $BAD_COLUMNS[$c] = 1;
+  } else { 
+    push @new_columns, $c;
+  }
+}
+@COLUMN_IDXS = @new_columns;
+
+
+my @DATA = ();
+if ( not $NO_GLOBAL ) { 
+  push @DATA, \%GLOBAL_DATA;
+}
+if ( $SEPARATE_COLUMNS ) { 
+  push @DATA, @COLUMN_DATA[@COLUMN_IDXS];
+}
+
+if ( $OUTPUT_MODES ) { $NORMALIZE_HISTOGRAM = 1 }
+if ( $OUTPUT_MODES and $SEPARATE_COLUMNS ) { 
+  die "Can't calculate modes for separate columns all at once yet.\n";
+}
+
+foreach my $data ( @DATA ) { 
+
+  # Check that we actually have values here
+  next if not defined $data->{VALUES};
+  next if ref $data->{VALUES} ne 'ARRAY';
+  next if scalar @{$data->{VALUES}} == 0;
+
+
+  $data->{STATS} = 
+    Utility::Calculate_Distribution_Statistics(
+      $data->{VALUES},
+      { hist => 0, pcnts => \@PERCENTILES },
+    );
+
+  if ( not defined $data->{STATS} ) { 
+    die "Statistics not generated for $data->{HEADER}";
+  }
+
+  if ( not defined $FILTER_MIN    ) { $FILTER_MIN    = $data->{STATS}{min} }
+  if ( not defined $FILTER_MAX    ) { $FILTER_MAX    = $data->{STATS}{max} }
+  if ( not defined $HISTOGRAM_MIN ) { $HISTOGRAM_MIN = $FILTER_MIN } 
+  if ( not defined $HISTOGRAM_MAX ) { $HISTOGRAM_MAX = $FILTER_MAX } 
+
+
+  #====== Make Histogram 
+  my %HISTOGRAM_OPTIONS = ( 
+          min       => $HISTOGRAM_MIN,
+          max       => $HISTOGRAM_MAX,
+          bins      => $BIN_COUNT,
+          width     => $BIN_WIDTH,
+          circular  => $CIRCULAR,
+          condense  => $CONDENSE,
+  );
+
+  if ( $OUTPUT_HISTOGRAM ) {
+    $data->{HISTOGRAM} = 
+      Utility::Histogram( $data->{VALUES}, \%HISTOGRAM_OPTIONS );
+    $data->{HIST_OUT} = $data->{HISTOGRAM};
+  }
+
+
+  #====== Make LogX Histogram 
+  if ( $HISTOGRAM_SCALE =~ /^log(\d+)$/ ) { 
+    my $base = $1;
+    $data->{HIST_LOG} = 
+      Utility::Make_LogX_Histogram( $data->{HISTOGRAM}, $base, \%HISTOGRAM_OPTIONS );
+    #$data->{HIST_OUT} = $data->{HIST_LOG};
+  }
+
+  if ( $HISTOGRAM_SCALE eq 'log2' ) { 
+    $data->{HIST_LOG2} = 
+      Utility::Make_LogX_Histogram( $data->{HISTOGRAM}, 2, \%HISTOGRAM_OPTIONS );
+    $data->{HIST_OUT} = $data->{HIST_LOG2};
+  }
+  
+  if ( $HISTOGRAM_SCALE eq 'log10' ) { 
+    $data->{HIST_LOG10} = 
+      Utility::Make_LogX_Histogram( $data->{HISTOGRAM}, 10, \%HISTOGRAM_OPTIONS );
+    $data->{HIST_OUT} = $data->{HIST_LOG10};
+  }
+    
+  #====== Normalize Histogram 
+  if ( $NORMALIZE_HISTOGRAM ) { 
+    $data->{HIST_NORM} = [ @{$data->{HIST_OUT}} ];
+    Utility::Normalize_Histogram($data->{HIST_NORM});
+    $data->{HIST_OUT} = $data->{HIST_NORM};
+  }
+
+  if ( $OUTPUT_MODES ) { 
+    $data->{MODES} = 
+      Utility::Find_Modes(
+        $data->{HIST_OUT},
+        { base=>$HISTOGRAM_MIN,
+          binwidth  => $BIN_WIDTH,
+          modemin   => 0.000000001,
+          circular  => $CIRCULAR,
+          window    => 10000000,
+        },
+      );
+  }
+}
+
+
+########################################################### CORRELATION MATRIX
+
+my @CORR = ();
+
+if ( $CORRELATION_MATRIX ) { 
+
+  foreach my $i ( @COLUMN_IDXS ) { 
+    my $data_i = $COLUMN_DATA[$i];
+    foreach my $j ( @COLUMN_IDXS ) { 
+      if ( $i == $j ) { $CORR[$i][$j] = 1.0 }
+      next if $i>=$j;
+      my $data_j = $COLUMN_DATA[$j];
+     
+      my $corr = Utility::Correlation($data_i->{VALUES}, $data_j->{VALUES});
+      $CORR[$i][$j] = $corr;
+      $CORR[$j][$i] = $corr;
+    }
+  }
+}
+
+
+
+
+
+##############################################################################
+#                                                                       OUTPUT
+##############################################################################
+
+
+#--- Column Formats
+
+# Track longest token and column header for output formatting
+my $MAX_TOKEN_LENGTH      = 10;
+my $MAX_HEADER_LENGTH     = 10;
+
+foreach my $header ( @HEADER ) { 
+  my $length = length($header); 
+  if ( $length > $MAX_TOKEN_LENGTH ) { $MAX_TOKEN_LENGTH = $length }
+}
+$MAX_HEADER_LENGTH += $COLUMN_PADDING;
+
+my $row_format  = "%-" . $MAX_TOKEN_LENGTH  . "s";
+my $val_format  = " %" . $MAX_HEADER_LENGTH . "." . $OUTPUT_PRECISION . "f";
+my $col_format  = " %" . $MAX_HEADER_LENGTH . "s";
+
+my $bin_format  = "%-" . $MAX_TOKEN_LENGTH  . "." . $OUTPUT_PRECISION . "f";
+if ( $HISTOGRAM_SCALE ne 'linear' ) { 
+   $bin_format  = "%-8d";
+}
+
+my $his_format  = " %" . $MAX_HEADER_LENGTH . "d";
+if ( $NORMALIZE_HISTOGRAM ) { 
+   $his_format  = " %" . $MAX_HEADER_LENGTH . "." . $OUTPUT_PRECISION . "f";
+}
+
+
+if ( $OUTPUT_TABS ) { 
+  $row_format = "%s";
+  $val_format = "\t%." . $OUTPUT_PRECISION . "f";
+  $col_format = "\t%s";
+
+  $bin_format = "%." . $OUTPUT_PRECISION . "f";
+  if ( $HISTOGRAM_SCALE ne 'linear' ) { 
+    $bin_format  = "%d";
+  }
+  $his_format = "\t%d";
+  if ( $NORMALIZE_HISTOGRAM ) { 
+    $his_format = "\t%." . $OUTPUT_PRECISION . "f";
+  }
+
+}
+
+
+my @OUT_STATS = qw(min max spread mean stddev stderr skew kurt count);
+foreach my $p ( @PERCENTILES ) { push @OUT_STATS, sprintf "pcnt_%02.0f", $p }
+
+
+#---- Output Header
+my $output_separator = "#" . '-'x($MAX_TOKEN_LENGTH);
+my $need_separator = 0;
+my $output_header = sprintf "$row_format", "#STAT";
+
+if ( not $NO_GLOBAL ) { 
+  $output_header .= sprintf $col_format, "GLOBAL";
+  $output_separator .= '-'x($MAX_HEADER_LENGTH);
+}
+
+if ( $SEPARATE_COLUMNS ) { 
+  $output_header .= join("", map { sprintf $col_format, $HEADER[$_] } @COLUMN_IDXS );
+  $output_separator .= '-' x (($MAX_HEADER_LENGTH+1) * scalar @COLUMN_IDXS);
+}
+$output_header .= "\n";
+$output_separator .= "\n";
+
+
+#---- Output Statistics
+if ( $OUTPUT_STATS ) { 
+  print $output_header;
+  foreach my $stat ( @OUT_STATS ) { 
+    printf $row_format, uc $stat;
+    foreach my $data ( @DATA ) { 
+      if ( not defined $data->{STATS}{$stat} ) { 
+        die "Missing datapoint for $data->{HEADER} $stat\n";
+      }
+
+      printf $val_format, $data->{STATS}{$stat};
+    }
+    print "\n";
+  }
+  $need_separator = 1;
+}
+
+
+
+
+#---- Output Histogram
+if ( $OUTPUT_HISTOGRAM ) { 
+  print $output_separator if $need_separator;
+
+  my $hist = $DATA[0]{HIST_OUT};
+  #my $hist = $GLOBAL_DATA{HIST_OUT};
+  
+   
+  #--------------- Linear Histograms
+  if ( $HISTOGRAM_SCALE eq 'linear' ) { 
+    # Header
+    printf $row_format, '#BIN';
+    foreach my $data ( @DATA ) { 
+      printf $col_format, $data->{HEADER};
+    }
+    print "\n";
+
+    # Data
+    foreach my $i ( 0..$#$hist ) { 
+      my $bin = $i*$BIN_WIDTH+$HISTOGRAM_MIN;
+      if ($PARSE_DATES) { printf "%20s", scalar(localtime($bin)) } 
+      else { printf $bin_format, $bin }
+      foreach my $data ( @DATA ) { 
+        printf $his_format, $data->{HIST_OUT}[$i] || 0;
+      }
+      print "\n";
+    }
+  }
+
+  #--------------- Log Histograms
+  if ( $HISTOGRAM_SCALE =~ /^log(\d+)$/ ) { 
+    # Header
+    print "Log histogram bins are on the interval [ BASE^I, BASE^(I+1) )\n";
+    printf $row_format, "#[ BIN_MIN , BIN_MAX )";
+    #printf $row_format, '<BIN';
+    foreach my $data ( @DATA ) { 
+      printf $col_format, $data->{HEADER};
+    }
+    print "\n";
+
+    foreach my $i ( 0..$#$hist ) { 
+      my $log = $1;
+      my $min = ($i==0) ? 0 : $log**$i;
+      my $max = $log**($i+1);
+      my $avgbin = ($min+$max)/2.0;
+      #printf "$bin_format", $avgbin;
+      #printf "$bin_format\t$bin_format", $min, $max;
+      printf "[ $bin_format , $bin_format )", $min, $max;
+      foreach my $data ( @DATA ) { 
+        printf $his_format, ($data->{HIST_OUT}[$i] || 0);
+      }
+      print "\n";
+    }
+  }
+
+    
+#    $bin = $i*$BIN_WIDTH+$HISTOGRAM_MIN if $HISTOGRAM_SCALE eq 'linear';
+#    $bin =  2**$i                       if $HISTOGRAM_SCALE eq 'log2';
+#    $bin = 10**$i                       if $HISTOGRAM_SCALE eq 'log10';
+#    printf $bin_format, $bin;
+#    foreach my $data ( @DATA ) { 
+#      printf $his_format, $data->{HIST_OUT}[$i] || 0;
+#    }
+#    print "\n";
+#
+#  }
+  $need_separator = 1;
+}
+
+
+#---- Output Correlation Matrix
+if ( $CORRELATION_MATRIX ) { 
+  my $output_separator = "#" . '-'x($MAX_TOKEN_LENGTH);
+  my $output_header = sprintf "$row_format", "#CORR";
+  if ( $SEPARATE_COLUMNS ) { 
+    $output_header .= join("", map { sprintf $col_format, $HEADER[$_] } @COLUMN_IDXS );
+    $output_separator .= '-' x (($MAX_HEADER_LENGTH+1) * scalar @COLUMN_IDXS);
+  }
+  $output_header .= "\n";
+  $output_separator .= "\n";
+
+  print $output_separator if $need_separator;
+  print $output_header;
+
+  foreach my $i ( @COLUMN_IDXS ) { 
+    printf $row_format, $HEADER[$i];
+
+    foreach my $j ( @COLUMN_IDXS ) { 
+      printf $val_format, $CORR[$i][$j];
+    }
+    print "\n";
+  }
+
+
+}

@@ -1,0 +1,227 @@
+#!/usr/bin/perl
+
+BEGIN { push @INC, "/Users/scouras/lab/code/scouras/", "/users/scouras/code/scouras" }
+
+use Utility qw(Find_Modes Calculate_Distribution_Statistics Normalize_Histogram Make_LogX_Histogram);
+#use POSIX;
+use warnings;
+use strict;
+use Data::Dumper;
+
+my $print_hist = 1;
+my $BINS  = 100;
+my $BINS_X = $BINS;
+my $BINS_Y = $BINS;
+my ($my_min,   $my_max  );
+my ($my_min_x, $my_max_x);
+my ($my_min_y, $my_max_y);
+my $circular = 0;
+my $condense = 0;
+my $print_stats = 1;
+my $NORMALIZE = 1;
+my $print_modes = 0;
+my $histtype = 'linear';
+
+my $width;
+my $width_x;
+my $width_y;
+
+my $header_x = 0;
+my $header_y = 0;
+
+my @FILES = grep { -e } @ARGV;
+
+foreach my $arg ( @ARGV ) {
+  my ( $a, $v ) = split /\=/, $arg;
+  if ( $a eq 'nohist'   ) { $print_hist = 0;  next; }
+  if ( $a eq 'log2hist' ) { $histtype='log2'; next; }
+  if ( $a eq 'log10hist') { $histtype='log10';next; }
+  if ( $a eq 'nostats'  ) { $print_stats = 0; next; }
+  if ( $a eq 'modes'    ) { $print_modes = 1; next; }
+  if ( $a eq 'bins'     ) { $BINS     = $v;   next; }
+  if ( $a eq 'binsx'    ) { $BINS_X   = $v;   next; }
+  if ( $a eq 'binsy'    ) { $BINS_Y   = $v;   next; }
+  if ( $a eq 'width'    ) { $width    = $v;   next; }
+  if ( $a eq 'widthx'   ) { $width_x  = $v;   next; }
+  if ( $a eq 'widthy'   ) { $width_y  = $v;   next; }
+  if ( $a eq 'min'      ) { $my_min   = $v;   next; }
+  if ( $a eq 'max'      ) { $my_max   = $v;   next; }
+  if ( $a eq 'minx'     ) { $my_min_x = $v;   next; }
+  if ( $a eq 'maxx'     ) { $my_max_x = $v;   next; }
+  if ( $a eq 'miny'     ) { $my_min_y = $v;   next; }
+  if ( $a eq 'maxy'     ) { $my_max_y = $v;   next; }
+  if ( $a eq 'circular' ) { $circular = 1;    next; }
+  if ( $a eq 'condense' ) { $condense = 1;    next; }
+  if ( $a eq 'headerx'  ) { $header_x = 1;    next; }
+  if ( $a eq 'headery'  ) { $header_y = 1;    next; }
+}
+
+if ( defined $width ) { 
+  if ( not defined $width_x ) { $width_x = $width }
+  if ( not defined $width_y ) { $width_y = $width }
+}
+
+
+#========= READ IN DATA
+
+#my @DATA1 = grep { /^[\d\.\-]+$/ } split /\s+/, `cat $FILES[0]`;
+#my @DATA2 = grep { /^[\d\.\-]+$/ } split /\s+/, `cat $FILES[1]`;
+
+my @CONTENTS1 = ();
+my @CONTENTS2 = ();
+
+if ( scalar @FILES == 2 ) { 
+  @CONTENTS1 = map { [ split /\s+/, $_ ] } split "\n", `cat $FILES[0]`;
+  @CONTENTS2 = map { [ split /\s+/, $_ ] } split "\n", `cat $FILES[1]`;
+} elsif ( scalar @FILES == 1 ) { 
+  my @contents = map { [ split /\s+/, $_ ] } split "\n", `cat $FILES[0]`;
+  foreach my $c ( @contents ) { 
+    if ( Utility::Is_Number($c->[0]) and Utility::Is_Number($c->[1]) ) { 
+      push @CONTENTS1, [$c->[0]];
+      push @CONTENTS2, [$c->[1]];
+    }
+  }
+} else { 
+  die "Wrong number of files.\n";
+}
+
+my @DATA1 = ();
+my @DATA2 = ();
+
+#print Dumper (@CONTENTS1[0..5]);
+#exit;
+
+# Remove Row Headers
+if ( $header_x ) { 
+  foreach my $i ( 0..$#CONTENTS1 ) { shift @{$CONTENTS1[$i]} }
+  foreach my $i ( 0..$#CONTENTS2 ) { shift @{$CONTENTS2[$i]} }
+}
+# Remove Column Headers
+if ( $header_y ) { 
+  shift @CONTENTS1;
+  shift @CONTENTS2;
+}
+
+# Push Contents into Data
+foreach my $i ( 0..$#CONTENTS1 ) { 
+  push @DATA1, 
+    grep { /^[\d\.\-]+$/ } 
+      @{$CONTENTS1[$i]};
+}
+
+foreach my $i ( 0..$#CONTENTS2 ) { 
+  push @DATA2, 
+    grep { /^[\d\.\-]+$/ } 
+      @{$CONTENTS2[$i]};
+}
+
+
+#print "Dumping!\n";
+#print Dumper (@CONTENTS1);
+#print Dumper (@DATA1);
+#exit;
+
+
+if ( not scalar @DATA1 == scalar @DATA2 ) { 
+  die sprintf "Data lengths didn't match %i vs. %i\n", (scalar @DATA1), (scalar @DATA2);
+}
+
+
+
+my @HIST = ();
+
+# GET MIN/MAX/COUNT
+my $minx = Utility::Min(@DATA1);
+my $maxx = Utility::Min(@DATA1);
+my $miny = Utility::Min(@DATA2);
+my $maxy = Utility::Min(@DATA2);
+my $count = scalar @DATA1;
+
+if ( defined $my_min   ) { $my_min_x = $my_min_y = $my_min }
+if ( defined $my_max   ) { $my_max_x = $my_max_y = $my_max }
+if ( defined $my_min_x ) { $minx = $my_min_x }
+if ( defined $my_max_x ) { $maxx = $my_max_x }
+if ( defined $my_min_y ) { $miny = $my_min_y }
+if ( defined $my_max_y ) { $maxy = $my_max_y }
+
+for my $i ( 0..$#DATA1 ) { 
+  if    ( not defined $DATA1[$i] ) { undef $DATA2[$i];  }
+  elsif ( not defined $DATA2[$i] ) { undef $DATA1[$i];  }
+  elsif ( $DATA1[$i] < $minx ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA1[$i] > $maxx ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA2[$i] < $miny ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+  elsif ( $DATA2[$i] > $maxy ) { undef $DATA1[$i]; undef $DATA2[$i]; }
+}
+
+#==== WIDTH X
+my $my_spread_x = $my_max_x - $my_min_x;
+if ( defined $width_x ) { 
+  $my_min_x = POSIX::floor($my_min_x/$width_x)*$width_x;
+  $my_max_x = POSIX::ceil ($my_max_x/$width_x)*$width_x;
+  $BINS = ($my_max_x-$my_min_x)/$width_x;
+} else { 
+  $width_x = $my_spread_x / $BINS_X;
+}
+
+#==== WIDTH Y
+my $my_spread_y = $my_max_y - $my_min_y;
+if ( defined $width_y ) { 
+  $my_min_y = POSIX::floor($my_min_y/$width_y)*$width_y;
+  $my_max_y = POSIX::ceil ($my_max_y/$width_y)*$width_y;
+  $BINS = ($my_max_y-$my_min_y)/$width_y;
+} else { 
+  $width_y = $my_spread_y / $BINS_Y;
+}
+
+
+my $min_bin_x =   0;
+my $max_bin_x =  -1;
+my $min_bin_y =   0;
+my $max_bin_y =  -1;
+
+foreach my $i ( 0..$#DATA1 ) {
+
+  my $x = $DATA1[$i];
+  my $y = $DATA2[$i];
+
+  next if not defined $x;
+  next if not defined $y;
+
+  my $xb = POSIX::floor(($x-$minx) / $width_x);
+  my $yb = POSIX::floor(($y-$miny) / $width_y);
+  $HIST[$xb][$yb]++;
+
+  if ( $xb < $min_bin_x ) { $min_bin_x = $xb }
+  if ( $xb > $max_bin_x ) { $max_bin_x = $xb }
+  if ( $yb < $min_bin_y ) { $min_bin_y = $yb }
+  if ( $yb > $max_bin_y ) { $max_bin_y = $yb }
+
+  #printf "%.2f %.2f %i %i\n", $x, $y, $xb, $yb;
+}
+
+#print "Min $min\n"
+#    . "Max $max\n"
+#    . "My Min $my_min\n"
+#    . "My Max $my_max\n"
+#    . "Min X $min_bin_x\n"
+#    . "Max X $max_bin_x\n"
+#    . "Min Y $min_bin_y\n"
+#    . "Max Y $max_bin_y\n"
+#    ;
+
+
+print "HIST";
+foreach my $y ( $min_bin_y..$max_bin_y ) { 
+  printf "\t%.2f", ($y*$width_y+$miny);
+}
+print "\n";
+
+foreach my $x ( $min_bin_x..$max_bin_x ) { 
+  printf "%.2f", $x*$width_x+$minx;
+  foreach my $y ( $min_bin_y..$max_bin_y ) { 
+    printf "\t%i", $HIST[$x][$y] || 0;
+  }
+  print "\n";
+}
+
+
